@@ -88,6 +88,7 @@ data.
 | `docs/images/ribbon-home.png` | The Home tab of the ribbon |
 | `docs/images/ribbon-insert.png` | The Insert tab of the ribbon |
 | `docs/images/tags.png` | A page with to-do boxes and tags |
+| `docs/images/tags-summary.png` | The scoped Tags Summary pane and tagged page |
 | `docs/images/file-screen.png` | The File screen with the notebook covers |
 | `docs/images/html-page.png` | An HTML page with the preview |
 | `docs/images/equations.png` | Inline and display equations |

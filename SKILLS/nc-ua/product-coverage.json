@@ -7,6 +7,18 @@
   "coverage_values": ["verified", "demonstrated", "not_covered", "stale", "unknown"],
   "features": [
     {
+      "id": "scoped-tag-summary",
+      "name": "Scoped tag summary and navigation",
+      "product_status": "implemented",
+      "discoverability": "home-find-tags",
+      "demo": "demonstrated",
+      "redmesa": "unknown",
+      "online": "unknown",
+      "verification_path": "cargo test -p notecraft-ui-egui --test ui find_tags_",
+      "limitation": "Custom tags and generated summary pages are not built.",
+      "notes": "Local tests cover scopes, incomplete tasks, refresh, distant note navigation, stale results and save errors. Deployed builds have not been checked."
+    },
+    {
       "id": "layered-embedded-objects",
       "name": "Layered embedded objects",
       "product_status": "unknown",

@@ -52,3 +52,10 @@
 {"method": "ui.move", "params": {"x": 150, "y": 790}}
 {"wait": 300}
 {"shot": "docs/images/diagrams.png"}
+{"method": "ui.open", "params": {"path": "my-notebook/ideas/tags"}}
+{"wait": 400}
+{"method": "ui.click", "params": {"x": 1302, "y": 100}}
+{"wait": 600}
+{"method": "ui.move", "params": {"x": 150, "y": 790}}
+{"wait": 300}
+{"shot": "docs/images/tags-summary.png"}

@@ -29,9 +29,17 @@ NoteCraft draws the mark instead of the word, but the word is what is in the fil
 stay readable in any editor and searchable from a terminal. A word that only looks like a tag,
 like #ideas without a space after it, is left alone.
 
+## Find tagged notes
+
+Choose **Home > Find Tags** to open the Tags Summary pane. Each result shows its tag,
+note text, notebook, section and page. Choose a result to open the page and focus that line.
+
+Use **Find tags in** to select the current page, section, notebook or all open notebooks.
+Page scope excludes subpages. **Only incomplete To Do** shows unchecked tasks.
+**Refresh tags** reads the files again, including changes made in another program.
+
 ## What is not here yet
 
-Custom tags and a summary page that collects every tagged line are not built. The Find Tags
-button says so.
+Custom tags and a generated summary page that collects every tagged line are not built.
 
 Next: [Pictures and files](../pictures-and-files/).

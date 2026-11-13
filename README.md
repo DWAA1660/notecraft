@@ -74,6 +74,11 @@ Every picture below is NoteCraft itself, drawn off screen by its own test harnes
 </tr>
 </table>
 
+![Tags Summary pane showing tagged notes with their notebook, section and page, a scope selector, an incomplete To Do filter and a Refresh tags button](docs/images/tags-summary.png)
+
+**Find Tags.** Collect tagged lines across a page, section, notebook or all open notebooks.
+Choose a result to open its page and focus the note.
+
 ## Why NoteCraft
 
 - **Your notes are files.** A notebook is a folder. A page is `index.html` or `index.md` with its
