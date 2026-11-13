@@ -2405,6 +2405,47 @@ fn the_pen_draws_on_open_canvas_away_from_any_text() {
     }
 }
 
+/// Issue #138: file details belong in the chrome, leaving the note to lead with its title.
+#[test]
+fn page_file_details_stay_below_the_canvas_and_drop_hint_is_transient() {
+    for theme in [LIGHT, DARK] {
+        for html in [false, true] {
+            let (_t, mut app, s) = sample_app("ui-compact-page-chrome");
+            let page_dir = if html { &s.html_page } else { &s.md_page };
+            app.open_path(&page_dir.to_string_lossy());
+            let mut h = sized_harness(app, theme, egui::vec2(1280.0, 900.0));
+            settle(&mut h);
+            assert_eq!(
+                h.query_all_by_label("Drop a file onto the page to add it").count(),
+                0,
+                "populated notes have no permanent file-drop instruction"
+            );
+            let canvas = h.state().page_rect().expect("page canvas");
+            let format = if html { "HTML" } else { "CommonMark + GFM" };
+            let details = h.get_by_label(&format!("{format} - Saved")).rect();
+            assert!(details.min.y >= canvas.max.y, "file details are in the status bar: {details:?}, canvas {canvas:?}");
+            for label in ["Full page", "Search", "Page source"] {
+                assert!(h.get_by_label(label).rect().max.y <= canvas.min.y, "{label} stays outside the page content");
+            }
+            review(&mut h, &format!("compact_page_chrome_{html}_{}", theme.id()));
+            let relative = page_dir.strip_prefix(h.state().session().root()).expect("sample page").to_string_lossy().replace('\\', "/");
+            let path = format!("<notebooks>/{relative}");
+            assert_eq!(h.query_all_by_label(&path).count(), 0, "the technical path is hidden until requested");
+            h.get_by_label(&format!("{format} - Saved")).hover();
+            for _ in 0..60 {
+                pump(&mut h);
+            }
+            assert_eq!(h.query_all_by_label(&path).count(), 1, "hover reveals the path and respects path redaction");
+            h.input_mut().hovered_files.push(egui::HoveredFile { path: Some(page_dir.join("picture.svg")), ..Default::default() });
+            pump(&mut h);
+            assert_eq!(h.query_all_by_label("Drop a file onto the page to add it").count(), 1, "drag-over explains where to drop");
+            h.input_mut().hovered_files.clear();
+            pump(&mut h);
+            assert_eq!(h.query_all_by_label("Drop a file onto the page to add it").count(), 0, "the instruction goes away with the drag");
+        }
+    }
+}
+
 /// The same on an HTML page, and the ink comes back when the page is opened again.
 #[test]
 fn ink_comes_back_when_the_page_is_opened_again() {
@@ -3194,6 +3235,40 @@ fn a_column_border_is_dragged_and_the_page_keeps_the_width() {
     // And the table is drawn to it: the second column starts further right than it did.
     let now = h.get_by_label("B").rect();
     assert!(now.min.x > b.min.x + 40.0, "the second column moved right: {} then {}", b.min.x, now.min.x);
+}
+
+/// A labelled "+ New section" button is always there for the chosen notebook, in both side
+/// panel layouts, not only a plus that appears on hover. It opens the section dialog for the
+/// notebook the open page is in, and the new section is the one chosen afterwards (issue #139).
+#[test]
+fn a_new_section_button_adds_a_section_to_the_chosen_notebook() {
+    for split in [false, true] {
+        let (_t, app, s) = if split { split_sample_app("ui-new-section-split") } else { sample_app("ui-new-section") };
+        let mut h = harness(app, LIGHT);
+        ask(&mut h, "ui.open", json!({"path": s.md_page.to_string_lossy()})).expect("open");
+        settle(&mut h);
+        let notebook = s.notebook.clone();
+        let before = notecraft_store::tree::child_dirs(&notebook).len();
+        review(&mut h, if split { "new_section_split" } else { "new_section_tree" });
+
+        h.get_by_label("+ New section").click();
+        settle(&mut h);
+        ask(&mut h, "ui.text", json!({"text": "Plans"})).expect("type the name");
+        settle(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "Enter"})).expect("Enter");
+        settle(&mut h);
+
+        let made: Vec<_> = notecraft_store::tree::child_dirs(&notebook)
+            .into_iter()
+            .filter(|d| notecraft_store::tree::read_node(d).is_some_and(|n| n.title == "Plans" && n.kind == notecraft_model::NodeKind::Section))
+            .collect();
+        assert_eq!(made.len(), 1, "split={split}: one section named Plans was made in the notebook");
+        assert_eq!(notecraft_store::tree::child_dirs(&notebook).len(), before + 1, "split={split}: and nothing else");
+        let state = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+        let chosen: Vec<&Value> =
+            state["rows"].as_array().map(|r| r.iter().filter(|row| row["selected"] == json!(true)).collect()).unwrap_or_default();
+        assert!(chosen.iter().any(|row| row["title"] == json!("Plans")), "split={split}: the new section is the chosen one: {chosen:?}");
+    }
 }
 
 /// Ctrl+F1 folds the ribbon away to its tab names and puts it back, as in Office, and the
@@ -5028,6 +5103,71 @@ fn a_page_keeps_the_paper_and_the_colour_it_was_given() {
     assert_eq!(again["paper"], json!("college"), "and the page still has its own paper");
     assert_eq!(again["pageColour"], json!("yellow"));
     review(&mut h, "page_paper");
+}
+
+/// Insert > Link (and Ctrl+K) asks for the words and the address, as OneNote does, instead of
+/// typing a placeholder into the note; the same dialog edits the link the caret is in and can
+/// take the link off while keeping its words. Both page formats (issue #163).
+#[test]
+fn the_link_dialog_puts_in_edits_and_removes_a_link() {
+    for html in [false, true] {
+        let (_t, app, s) = sample_app("ui-link-dialog");
+        let mut h = harness(app, LIGHT);
+        h.run();
+        let page = if html { &s.html_page } else { &s.md_page };
+        notecraft_store::page::save_body(page, if html { "<p>see the plan today</p>" } else { "see the plan today" }).expect("fixture");
+        ask(&mut h, "ui.open", json!({"path": page.to_string_lossy()})).expect("open");
+        settle(&mut h);
+        ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
+        settle(&mut h);
+        // Pick "the plan": after "see ", eight letters with Shift held.
+        ask(&mut h, "ui.key", json!({"key": "Home"})).expect("home");
+        settle(&mut h);
+        for _ in 0..4 {
+            ask(&mut h, "ui.key", json!({"key": "ArrowRight"})).expect("right");
+            pump(&mut h);
+        }
+        for _ in 0..8 {
+            ask(&mut h, "ui.key", json!({"key": "ArrowRight", "shift": true})).expect("pick");
+            pump(&mut h);
+        }
+        settle(&mut h);
+
+        // Ctrl+K: the picked words are the words to show; the address is asked for.
+        ask(&mut h, "ui.key", json!({"key": "K", "ctrl": true})).expect("Ctrl+K");
+        settle(&mut h);
+        assert!(h.query_all_by_label("Text to display").next().is_some(), "html={html}: the Link dialog is open");
+        ask(&mut h, "ui.text", json!({"text": "https://example.test/plan"})).expect("type the address");
+        settle(&mut h);
+        review(&mut h, "link_dialog");
+        h.get_by_label("OK").click();
+        settle(&mut h);
+        h.state_mut().save();
+        let body = notecraft_store::page::load_page(page).expect("load").body;
+        let made = if html { "<a href=\"https://example.test/plan\">the plan</a>" } else { "[the plan](https://example.test/plan)" };
+        assert!(body.contains(made), "html={html}: the words became a link:\n{body}");
+        assert!(body.contains("see ") && body.contains(" today"), "html={html}: and the rest is as it was:\n{body}");
+
+        // With the caret in the link, the dialog edits it.
+        ask(&mut h, "ui.key", json!({"key": "ArrowLeft"})).expect("into the link");
+        settle(&mut h);
+        h.get_by_label("Insert").click();
+        settle(&mut h);
+        h.get_by_label("Link").click();
+        settle(&mut h);
+        assert!(h.query_all_by_label("Remove link").next().is_some(), "html={html}: an existing link can be taken off");
+        h.get_by_label("Remove link").click();
+        settle(&mut h);
+        h.state_mut().save();
+        let body = notecraft_store::page::load_page(page).expect("load").body;
+        assert!(!body.contains("example.test"), "html={html}: the link is gone:\n{body}");
+        assert!(body.contains("see the plan today"), "html={html}: and its words are kept:\n{body}");
+
+        // Undo puts the link back.
+        ask(&mut h, "ui.key", json!({"key": "Z", "ctrl": true})).expect("undo");
+        settle(&mut h);
+        assert!(h.state().body().unwrap_or_default().contains("example.test/plan"), "html={html}: undo brings the link back");
+    }
 }
 
 /// Copy link to page, the way OneNote copies one: the link names the page from the
@@ -7169,31 +7309,103 @@ fn font_selectors_show_selection_values_and_mixed_state_in_both_formats() {
 /// SUP-009 (owner, 2026-11-11): the size box is editable, as OneNote's is. A typed size applies
 /// to the selection on Enter, and the box then shows that size.
 #[test]
-#[ignore = "SUP-009: clicking into the size box clears the page selection; the typed size does not apply yet"]
 fn a_typed_font_size_applies_to_the_selection() {
+    typed_font_size_case(false, false);
+}
+
+#[test]
+fn a_typed_font_size_applies_to_the_html_selection() {
+    typed_font_size_case(true, false);
+}
+
+#[test]
+fn a_typed_font_size_applies_on_enter_in_cmgfm() {
+    typed_font_size_case(false, true);
+}
+
+#[test]
+fn a_typed_font_size_applies_on_enter_in_html() {
+    typed_font_size_case(true, true);
+}
+
+fn typed_font_size_case(html: bool, enter: bool) {
     let (_t, app, s) = sample_app("ui-font-size-typed");
-    let mut h = sized_harness(app, LIGHT, egui::vec2(2000.0, 900.0));
-    notecraft_store::page::save_body(&s.md_page, "<span style=\"font-size: 18pt\">alpha</span> plain").expect("fixture");
-    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    let (theme, width) = if html == enter { (LIGHT, 2000.0) } else { (DARK, 1280.0) };
+    let mut h = sized_harness(app, theme, egui::vec2(width, 900.0));
+    let page = if html { &s.html_page } else { &s.md_page };
+    let format = if html { notecraft_model::PageFormat::Html } else { notecraft_model::PageFormat::Cmgfm };
+    let body = if html {
+        "<p><span style=\"font-size: 18pt\"><b>alpha</b></span> plain</p><p>untouched paragraph</p>"
+    } else {
+        "<span style=\"font-size: 18pt\">**alpha**</span> plain\n\nuntouched paragraph"
+    };
+    notecraft_store::page::save_body(page, body).expect("fixture");
+    h.state_mut().open_path(&page.to_string_lossy());
     settle(&mut h);
+    let before = h.state().body().unwrap_or_default().to_string();
     ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
     pump(&mut h);
     ask(&mut h, "ui.key", json!({"key": "A", "ctrl": true})).expect("select all");
     settle(&mut h);
     assert_eq!(h.get_by_label("Font Size").value().as_deref(), Some("Mixed"));
     h.get_by_label("Font size").click();
-    h.run();
+    pump(&mut h);
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    h.run();
+    pump(&mut h);
     h.get_by_label("Font size").type_text("24");
-    h.run();
+    pump(&mut h);
     assert_eq!(h.get_by_label("Font size").value().as_deref(), Some("24"), "the box holds the typed text before Enter");
-    // Leaving the box (by clicking the drop-down arrow) applies the typed size.
-    h.get_by_label("Font Size").click();
-    h.run();
+    if enter {
+        h.key_press(egui::Key::Enter);
+    } else {
+        // Leaving the value box for its arrow also commits the entry.
+        h.get_by_label("Font Size").click();
+    }
+    pump(&mut h);
     settle(&mut h);
     assert_eq!(h.get_by_label("Font Size").value().as_deref(), Some("24"), "the box shows the typed size");
-    assert!(h.state().body().unwrap_or_default().contains("24pt"), "the selection took the typed size");
+    let after = h.state().body().unwrap_or_default().to_string();
+    let (blocks, _) = notecraft_formats::boxes::read(format, &after);
+    assert_eq!(blocks.len(), 2, "Enter in the combo must not create a paragraph in the note");
+    let notecraft_formats::Block::Paragraph(selected) = &blocks[0] else { panic!("selected paragraph") };
+    assert_eq!(selected.iter().map(|s| s.text.as_str()).collect::<String>(), "alpha plain", "typing in the combo did not edit the note");
+    assert!(selected.iter().all(|s| s.font_size == Some(24)), "the original selection took the size: {after}");
+    assert_eq!(selected.iter().filter(|s| s.bold).map(|s| s.text.as_str()).collect::<String>(), "alpha", "other marks survive");
+    let notecraft_formats::Block::Paragraph(outside) = &blocks[1] else { panic!("outside paragraph") };
+    assert_eq!(outside.iter().map(|s| s.text.as_str()).collect::<String>(), "untouched paragraph");
+    assert!(outside.iter().all(|s| s.font_size.is_none()), "the unselected paragraph is unchanged");
+    review(&mut h, &format!("typed_font_size_{html}_{enter}"));
+    ask(&mut h, "ui.undo", json!({})).expect("undo size");
+    settle(&mut h);
+    assert_eq!(h.state().body().unwrap_or_default(), before, "one undo restores the original mixed sizes");
+    ask(&mut h, "ui.redo", json!({})).expect("redo size");
+    settle(&mut h);
+    assert_eq!(h.state().body().unwrap_or_default(), after);
+    h.state_mut().save_page_now();
+    h.state_mut().open_path(&page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.state().body().unwrap_or_default().trim_end(), after.trim_end(), "typed size survives saving and reopening");
+
+    for (entry, key) in [("19", egui::Key::Enter), ("96", egui::Key::Enter), ("not a size", egui::Key::Enter), ("36", egui::Key::Escape)] {
+        ask(&mut h, "ui.caret", json!({"block": 0})).expect("select the same paragraph");
+        pump(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "A", "ctrl": true})).expect("select all");
+        pump(&mut h);
+        h.get_by_label("Font size").click();
+        pump(&mut h);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        pump(&mut h);
+        h.get_by_label("Font size").type_text(entry);
+        pump(&mut h);
+        h.key_press(key);
+        pump(&mut h);
+        assert_eq!(
+            h.get_by_label("Font Size").value().as_deref(),
+            Some("24"),
+            "rejected/cancelled entry {entry} reverts to the actual selection size"
+        );
+        assert_eq!(h.state().body().unwrap_or_default().trim_end(), after.trim_end(), "rejected/cancelled entry {entry} does not alter the page");
+    }
 }
 
 /// OneNote: the size list opens under the size box, left-aligned with it, not under the arrow.
@@ -7258,8 +7470,9 @@ fn dragging_across_text_selects_it() {
     let page = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"].clone();
     let origin = &page["origin"];
     let (ox, oy) = (origin[0].as_f64().unwrap_or(0.0) as f32, origin[1].as_f64().unwrap_or(0.0) as f32);
-    let _ = (ox, oy);
-    let (y, x0, x1) = (308.0, 500.0, 560.0);
+    // Follow the rendered text container, rather than a screen coordinate that
+    // becomes blank paper when the surrounding application chrome changes.
+    let (y, x0, x1) = (oy + 24.0, ox + 10.0, ox + 70.0);
     ask(&mut h, "ui.click", json!({"x": x0, "y": y})).expect("focus the text");
     settle(&mut h);
     ask(&mut h, "ui.press", json!({"x": x0, "y": y})).expect("press");
@@ -7272,6 +7485,7 @@ fn dragging_across_text_selects_it() {
     settle(&mut h);
     let caret = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"]["caret"].clone();
     assert!(caret != Value::Null, "the page has a caret or selection after a drag: {caret}");
+    assert_eq!(caret["text"].as_str(), Some("hello world"), "the drag reached the fixture's text");
     assert!(caret["at"] != caret["anchor"], "the drag made a selection, not a caret: {caret}");
 }
 
@@ -8288,6 +8502,70 @@ fn font_size_applies_to_selected_text_and_survives_reopen_in_both_formats() {
         h.state_mut().open_path(&path);
         settle(&mut h);
         assert_eq!(h.state().body().unwrap_or_default().trim_end(), body.trim_end(), "the font size survives save and reopen");
+    }
+}
+
+/// Format Painter: click in formatted words, click Format Painter, pick other words, and they
+/// take that formatting; Escape puts a double-clicked painter down (issue #165).
+#[test]
+fn the_format_painter_puts_the_formatting_on_the_words_picked_next() {
+    for html in [false, true] {
+        let (_t, app, s) = sample_app("ui-format-painter");
+        let spans_of = |body: &str| -> Vec<notecraft_formats::Span> {
+            let md = if html { notecraft_formats::html::to_markdown(body) } else { body.to_string() };
+            notecraft_formats::markdown::parse(&md)
+                .into_iter()
+                .flat_map(|b| match b {
+                    notecraft_formats::Block::Paragraph(s) => s,
+                    _ => Vec::new(),
+                })
+                .collect()
+        };
+        let mut h = harness(app, LIGHT);
+        h.run();
+        let page = if html { &s.html_page } else { &s.md_page };
+        notecraft_store::page::save_body(page, if html { "<p><b><i>Big</i></b> plain words</p>" } else { "***Big*** plain words" }).expect("fixture");
+        ask(&mut h, "ui.open", json!({"path": page.to_string_lossy()})).expect("open");
+        settle(&mut h);
+        ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
+        settle(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "Home"})).expect("home");
+        settle(&mut h);
+        // Into "Big", which is bold and italic, then pick up its formatting.
+        for _ in 0..2 {
+            ask(&mut h, "ui.key", json!({"key": "ArrowRight"})).expect("right");
+            pump(&mut h);
+        }
+        settle(&mut h);
+        h.get_by_label("Format Painter").click();
+        settle(&mut h);
+        // Pick "words" (the last five letters) and let go of the pointer, which is when it paints.
+        // The ribbon took the keyboard; back into the line, as a click there would.
+        ask(&mut h, "ui.caret", json!({"block": 0})).expect("back into the line");
+        settle(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "End"})).expect("end");
+        settle(&mut h);
+        for _ in 0..5 {
+            ask(&mut h, "ui.key", json!({"key": "ArrowLeft", "shift": true})).expect("pick");
+            pump(&mut h);
+        }
+        settle(&mut h);
+        let line = h.state().page_rect().expect("the page");
+        ask(&mut h, "ui.release", json!({"x": line.max.x - 4.0, "y": line.max.y - 4.0})).expect("let go");
+        settle(&mut h);
+        h.state_mut().save();
+        let body = notecraft_store::page::load_page(page).expect("load").body;
+        let spans = spans_of(&body);
+        assert!(spans.iter().any(|s| s.text.contains("words") && s.bold && s.italic), "html={html}: the picked words took the formatting:\n{body}");
+        assert!(spans.iter().any(|s| s.text.contains("plain") && !s.bold && !s.italic), "html={html}: and nothing else did:\n{body}");
+        assert!(body.contains("Big") && body.contains("plain") && body.contains("words"), "html={html}: the words are all there:\n{body}");
+
+        // Undo takes the painting back.
+        ask(&mut h, "ui.key", json!({"key": "Z", "ctrl": true})).expect("undo");
+        settle(&mut h);
+        let now = h.state().body().unwrap_or_default().to_string();
+        let spans = spans_of(&now);
+        assert!(spans.iter().any(|s| s.text.contains("words") && !s.bold), "html={html}: undo takes the formatting back off:\n{now}");
     }
 }
 
