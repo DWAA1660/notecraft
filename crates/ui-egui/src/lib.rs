@@ -44,6 +44,7 @@ pub mod ribbon_icons;
 pub mod saver;
 pub mod snippets;
 pub mod stylus;
+pub(crate) mod tag_summary;
 pub mod telemetry_export;
 #[cfg(test)]
 mod testing_dir;

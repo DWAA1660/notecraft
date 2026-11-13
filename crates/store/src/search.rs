@@ -6,6 +6,148 @@ use notecraft_formats::{boxes, html, render};
 use notecraft_model::PageFormat;
 use std::path::{Path, PathBuf};
 
+/// A real tag on a page, with its source identity rather than a match in raw source text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagHit {
+    pub path: PathBuf,
+    pub title: String,
+    pub section_path: Option<PathBuf>,
+    pub section: String,
+    pub notebook_path: PathBuf,
+    pub notebook: String,
+    pub block: usize,
+    pub tag: notecraft_model::Tag,
+    pub text: String,
+    pub done: Option<bool>,
+}
+
+impl TagHit {
+    /// The source can change while the summary is open. Do not focus another note at its old index.
+    pub fn matches_block(&self, block: &notecraft_formats::Block) -> bool {
+        tags_of_block(block).into_iter().any(|(tag, done, text)| tag == self.tag && done == self.done && text == self.text)
+    }
+}
+
+fn tags_of_block(content: &notecraft_formats::Block) -> Vec<(notecraft_model::Tag, Option<bool>, String)> {
+    use notecraft_formats::Block;
+    use notecraft_model::Tag;
+    let (spans, task) = match content {
+        Block::Paragraph(spans) | Block::Heading { spans, .. } | Block::Quote(spans) => (spans, None),
+        Block::Item { spans, task, .. } => (spans, *task),
+        _ => return Vec::new(),
+    };
+    let text = spans.iter().map(|s| s.text.as_str()).collect::<String>();
+    let prefix = spans.iter().take_while(|s| !s.code && !s.math && s.image.is_none()).map(|s| s.text.as_str()).collect::<String>();
+    let (marker, rest) = notecraft_model::Tag::split(&text);
+    let marker = marker.filter(|tag| Tag::split(&prefix).0 == Some(*tag));
+    let rest = if marker.is_some() { rest } else { &text };
+    let mut tags = Vec::new();
+    if let Some(done) = task {
+        tags.push((Tag::ToDo, Some(done), rest.to_owned()));
+    }
+    if let Some(tag) = marker
+        && !(tag == Tag::ToDo && task.is_some())
+    {
+        tags.push((tag, None, rest.to_owned()));
+    }
+    tags
+}
+
+/// Read tags from the open notebooks. `within` restricts the result to a real node;
+/// `exact_page` excludes sub-pages. A read failure is an error, never an empty summary.
+pub fn find_tags(notebooks: &[crate::tree::Node], within: Option<&Path>, exact_page: bool, incomplete: bool) -> crate::Result<Vec<TagHit>> {
+    let mut query = TagQuery { within, exact_page, incomplete, seen: Default::default(), hits: Vec::new() };
+    for notebook in notebooks {
+        // Session's open-notebook paths are canonical already. Scope checks must
+        // precede I/O so a disconnected unrelated notebook cannot break this query.
+        if within.is_some_and(|path| !path.starts_with(&notebook.path) && !notebook.path.starts_with(path)) {
+            continue;
+        }
+        let root = std::fs::canonicalize(&notebook.path).map_err(|e| crate::StoreError::io("read tag scope", &notebook.path, e))?;
+        query.visit(&root, &root, &notebook.info.title, None)?;
+    }
+    Ok(query.hits)
+}
+
+struct TagQuery<'a> {
+    within: Option<&'a Path>,
+    exact_page: bool,
+    incomplete: bool,
+    seen: std::collections::HashSet<PathBuf>,
+    hits: Vec<TagHit>,
+}
+
+impl TagQuery<'_> {
+    fn visit(&mut self, dir: &Path, notebook: &Path, notebook_title: &str, section: Option<(&Path, &str)>) -> crate::Result<()> {
+        if self.within.is_some_and(|within| !dir.starts_with(within) && !within.starts_with(dir)) || !self.seen.insert(dir.to_path_buf()) {
+            return Ok(());
+        }
+        if !dir.starts_with(notebook) {
+            return Err(crate::StoreError::invalid(format!("tag scope reaches outside its notebook: {}", dir.display())));
+        }
+        let info = read_node(dir);
+        let is_page = page_file(dir).is_some();
+        if info.is_none() && !is_page {
+            if std::fs::metadata(dir.join("_node.toml")).is_ok() {
+                return Err(crate::StoreError::invalid(format!("cannot read tag scope metadata: {}", dir.display())));
+            }
+            return Ok(());
+        }
+        let section = match info.as_ref().filter(|n| n.kind == notecraft_model::NodeKind::Section) {
+            Some(node) => Some((dir, node.title.as_str())),
+            None => section,
+        };
+        if is_page && self.within.is_none_or(|within| dir.starts_with(within)) {
+            let page = load_page(dir)?;
+            let blocks = boxes::read(page.format, &page.body).0;
+            for (block, content) in blocks.iter().enumerate() {
+                for (tag, done, text) in tags_of_block(content) {
+                    if self.incomplete && (tag != notecraft_model::Tag::ToDo || done != Some(false)) {
+                        continue;
+                    }
+                    self.hits.push(TagHit {
+                        path: dir.to_path_buf(),
+                        title: page.title.clone(),
+                        section_path: section.map(|(path, _)| path.to_path_buf()),
+                        section: section.map(|(_, title)| title.to_owned()).unwrap_or_default(),
+                        notebook_path: notebook.to_path_buf(),
+                        notebook: notebook_title.to_owned(),
+                        block,
+                        tag,
+                        text,
+                        done,
+                    });
+                }
+            }
+        }
+        if self.exact_page && self.within == Some(dir) {
+            return Ok(());
+        }
+        let entries = std::fs::read_dir(dir).map_err(|e| crate::StoreError::io("read tag scope", dir, e))?;
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| crate::StoreError::io("read tag scope", dir, e))?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "assets" || name.starts_with('.') {
+                continue;
+            }
+            if self.within.is_some_and(|within| !path.starts_with(within) && !within.starts_with(&path)) {
+                continue;
+            }
+            let meta = std::fs::metadata(&path).map_err(|e| crate::StoreError::io("read tag scope", &path, e))?;
+            if meta.is_dir() {
+                children.push(std::fs::canonicalize(&path).map_err(|e| crate::StoreError::io("read tag scope", &path, e))?);
+            }
+        }
+        children.sort();
+        for child in children {
+            self.visit(&child, notebook, notebook_title, section)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub path: PathBuf,

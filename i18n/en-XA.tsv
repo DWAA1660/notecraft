@@ -820,3 +820,18 @@
 @id	ui.welcome_wizard_finish	$$$Finish@@@
 @id	ui.welcome_wizard_done_title	$$$Thank you@@@
 @id	ui.welcome_wizard_done_body	$$$NoteCraft is ready to use. Your choices are saved. This setup appears again only after you reset the preferences.@@@
+@id	ui.close_tags_summary	$$$Close tags summary@@@
+@id	ui.find_tags_in	$$$Find tags in@@@
+@id	ui.no_tagged_notes	$$$No tagged notes in this scope.@@@
+@id	ui.only_incomplete_todo	$$$Only incomplete To Do@@@
+@id	ui.refresh_tags	$$$Refresh tags@@@
+@id	ui.tag_task_completed	$$$Completed@@@
+@id	ui.tag_task_incomplete	$$$Incomplete@@@
+@id	ui.tagged_note_changed	$$$The tagged note has changed. Refresh the summary.@@@
+@id	ui.tagged_notes_count	$$$Tagged notes: {count}@@@
+@id	ui.tags_query_failed	$$$Could not read the tag summary.@@@
+@id	ui.tags_scope_all	$$$All open notebooks@@@
+@id	ui.tags_scope_notebook	$$$Current notebook@@@
+@id	ui.tags_scope_page	$$$Current page@@@
+@id	ui.tags_scope_section	$$$Current section@@@
+@id	ui.tags_summary	$$$Tags Summary@@@

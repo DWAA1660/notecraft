@@ -68,6 +68,140 @@ fn sample_app(label: &str) -> (TempDir, NoteCraftApp, Sample) {
     (t, app, sample)
 }
 
+#[test]
+fn find_tags_scopes_filters_refreshes_and_navigates_to_the_tagged_block() {
+    for theme in [LIGHT, DARK] {
+        let (_t, mut app, s) = sample_app("ui-find-tags");
+        notecraft_store::page::save_body(&s.md_page, "- [ ] Book train\n- [x] Done task\n\n#important Review proposal").expect("tagged markdown");
+        let body = format!("{}<p>#question Ask partner</p>", "<p>ordinary paragraph</p>".repeat(35));
+        notecraft_store::page::save_body(&s.html_page, &body).expect("tagged HTML");
+        app.open_path(&s.md_page.to_string_lossy());
+        let mut h = sized_harness(app, theme, egui::vec2(2000.0, 900.0));
+        settle(&mut h);
+        h.get_by_label("Find Tags").click();
+        settle(&mut h);
+        assert!(h.query_by_label("Tags Summary").is_some(), "Find Tags opens a summary pane");
+        assert!(h.query_by_label("To Do: Book train").is_some());
+        assert!(h.query_by_label("To Do: Done task").is_some());
+        assert!(h.query_by_label("Important: Review proposal").is_some());
+        assert!(h.query_by_label("Question: Ask partner").is_some());
+        h.get_by_label("Find tags in").click();
+        settle(&mut h);
+        h.get_by_label("Current page").click();
+        settle(&mut h);
+        assert!(h.query_by_label("Question: Ask partner").is_none(), "page scope excludes another page");
+        h.get_by_label("Only incomplete To Do").click();
+        settle(&mut h);
+        assert!(h.query_by_label("To Do: Book train").is_some());
+        assert!(h.query_by_label("To Do: Done task").is_none());
+        assert!(h.query_by_label("Important: Review proposal").is_none());
+        notecraft_store::page::save_body(&s.md_page, "- [x] Book train\n\n#important Review proposal").expect("update on disk");
+        h.get_by_label("Refresh tags").click();
+        settle(&mut h);
+        assert!(h.query_by_label("To Do: Book train").is_none(), "refresh reads the new completion state");
+        h.get_by_label("Only incomplete To Do").click();
+        pump(&mut h);
+        h.get_by_label("Find tags in").click();
+        settle(&mut h);
+        h.get_by_label("All open notebooks").click();
+        settle(&mut h);
+        // The page body moves with its contents after a long page scrolls.
+        let canvas = h.state().page_rect().expect("canvas before scrolling");
+        h.get_by_label("Question: Ask partner").click();
+        settle(&mut h);
+        assert_eq!(h.state().title(), Some("Project X"));
+        let info = ask(&mut h, "ui.inspect", json!({})).expect("navigation state");
+        assert_eq!(info.pointer("/page/caret/block").and_then(Value::as_u64), Some(35));
+        assert!(
+            h.query_all_by_role(egui::accesskit::Role::TextInput)
+                .any(|n| n.value().is_some_and(|v| v.contains("Ask partner")) && n.rect().intersects(canvas)),
+            "the tagged note is scrolled into the canvas"
+        );
+        review(&mut h, &format!("tags_summary_{}", theme.id()));
+        h.get_by_label("Close tags summary").click();
+        settle(&mut h);
+        assert!(h.query_by_label("Tags Summary").is_none());
+    }
+}
+
+#[test]
+fn find_tags_reveals_a_note_in_a_distant_container_without_moving_its_contents() {
+    let (_t, mut app, s) = sample_app("ui-find-tags-distant");
+    let blocks = notecraft_formats::markdown::parse("#question Distant note");
+    let containers = vec![notecraft_model::container::Container::new(2400.0, 1800.0, 400.0, 1)];
+    let body = notecraft_formats::boxes::write(notecraft_model::PageFormat::Html, &blocks, Some(&containers));
+    notecraft_store::page::save_body(&s.html_page, &body).expect("distant fixture");
+    app.open_path(&s.html_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(2000.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("Find Tags").click();
+    settle(&mut h);
+    let canvas = h.state().page_rect().expect("visible canvas before navigation");
+    h.get_by_label("Question: Distant note").click();
+    settle(&mut h);
+    assert!(
+        h.query_all_by_role(egui::accesskit::Role::TextInput)
+            .any(|n| n.value().as_deref() == Some("Distant note") && canvas.contains(n.rect().center())),
+        "navigation must reveal a container beyond the right and bottom edges"
+    );
+    let page = notecraft_store::page::load_page(&s.html_page).expect("unchanged page");
+    assert_eq!(notecraft_formats::boxes::read(page.format, &page.body).1, Some(containers));
+}
+
+#[test]
+fn find_tags_saves_pending_edits_and_reports_a_save_failure() {
+    let (_t, mut app, s) = sample_app("ui-find-tags-save");
+    notecraft_store::page::save_body(&s.html_page, "<p>#question Original question</p>").expect("tagged page");
+    notecraft_store::page::save_body(&s.md_page, "#question Other note").expect("navigation target");
+    app.open_path(&s.html_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(2000.0, 900.0));
+    settle(&mut h);
+    ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "changed "})).expect("edit");
+    pump(&mut h);
+    h.get_by_label("Find Tags").click();
+    settle(&mut h);
+    assert!(notecraft_store::page::load_page(&s.html_page).expect("saved page").body.contains("changed"));
+    ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret again");
+    settle(&mut h);
+    // A real directory at the page-file path makes its atomic replacement fail.
+    let file = s.html_page.join("index.html");
+    std::fs::remove_file(&file).expect("remove owned fixture file");
+    std::fs::create_dir(&file).expect("obstruct fixture save");
+    ask(&mut h, "ui.text", json!({"text": "unsaved "})).expect("unsaved edit");
+    pump(&mut h);
+    h.get_by_label("Question: Other note").click();
+    settle(&mut h);
+    assert_eq!(h.state().title(), Some("Project X"), "a failed save must keep the current page open");
+    assert!(h.query_by_label_contains("Tagged notes:").is_none(), "failed navigation clears the stale list");
+    h.get_by_label("Find Tags").click();
+    settle(&mut h);
+    assert!(h.query_by_label("Tags Summary").is_some());
+    assert!(h.query_by_label_contains("Tagged notes:").is_none(), "a failed save cannot produce a stale summary");
+    assert!(!h.state().status().is_empty());
+}
+
+#[test]
+fn find_tags_refuses_a_stale_result_instead_of_focusing_another_note() {
+    let (_t, mut app, s) = sample_app("ui-find-tags-stale");
+    notecraft_store::page::save_body(&s.html_page, "<p>#question Original question</p>").expect("tagged page");
+    app.open_path(&s.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(2000.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("Find Tags").click();
+    settle(&mut h);
+    notecraft_store::page::save_body(&s.html_page, "<p>Different untagged note</p>").expect("edit source after query");
+    h.get_by_label("Question: Original question").click();
+    settle(&mut h);
+    assert!(h.state().status().contains("Refresh the summary"), "the stale location is reported: {}", h.state().status());
+    let info = ask(&mut h, "ui.inspect", json!({})).expect("navigation state");
+    assert!(info.pointer("/page/caret").is_some_and(Value::is_null), "a different note is not put into editing focus");
+    h.get_by_label("Refresh tags").click();
+    settle(&mut h);
+    assert!(h.query_by_label("Question: Original question").is_none());
+}
+
 fn split_sample_app(label: &str) -> (TempDir, NoteCraftApp, Sample) {
     let t = TempDir::new(label);
     let mut s = session(&t);

@@ -32,7 +32,23 @@ grep -rn "#important" ~/Documents/NoteCraft
 A word that only looks like a tag is left alone: `#ideas for later` is ordinary text, because
 the marker is a whole word followed by a space.
 
+## Find tagged notes
+
+Choose **Home > Find Tags** to open the Tags Summary pane. Each result shows the tag,
+the note text, and its notebook, section and page. Choose a result to open its page,
+scroll to the tagged line and put the caret there.
+
+Use **Find tags in** to search the current page, current section, current notebook,
+or all open notebooks. Page scope excludes subpages. **Only incomplete To Do** shows
+unchecked tasks. **Refresh tags** reads the current files again, including changes
+made outside NoteCraft. Pending edits in the current page are saved before searching.
+If a file cannot be read, the pane reports the error instead of showing a partial list.
+
+The pane follows the current page when a current-page, section or notebook scope is
+selected. If a result changed since the last search, refresh the summary and try again.
+
 ## What is missing
 
 The tag lists elsewhere are longer than this one, their tags can be customised, and they collect
-every tagged line into a summary page. None of that is built; the Find Tags button says so.
+every tagged line into a generated summary page. Custom tags and generated summary pages
+are not built.

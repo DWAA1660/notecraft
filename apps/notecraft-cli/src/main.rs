@@ -204,6 +204,11 @@ fn describe(o: &Output) -> String {
             items.iter().map(|item| format!("{}  {}  {} item(s)  {}", item.id, item.title, item.count, item.deleted)).collect::<Vec<_>>().join("\n")
         }
         Output::Hits(h) => h.iter().map(|x| format!("{}  {}\n    {}", x.title, display_path(&x.path), x.snippet)).collect::<Vec<_>>().join("\n"),
+        Output::Tags(h) => h
+            .iter()
+            .map(|x| format!("{}: {}\n    {} / {}  {} (block {})", x.tag.label(), x.text, x.section, x.title, display_path(&x.path), x.block))
+            .collect::<Vec<_>>()
+            .join("\n"),
         Output::Report(r) => {
             let mut s = r.problems.iter().map(|p| format!("problem: {}: {}", display_path(&p.path), p.message)).collect::<Vec<_>>().join("\n");
             if !s.is_empty() {

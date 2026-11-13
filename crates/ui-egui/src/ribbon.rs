@@ -26,6 +26,8 @@ pub const TABLE_TAB: &str = "Table";
 /// What a ribbon control asks the window to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
+    /// Find the tagged notes in the open notebooks.
+    FindTags,
     /// The File tab: open the File screen.
     File,
     /// Show the saved versions of the open page.
@@ -1139,8 +1141,8 @@ fn home_tab(ui: &mut Ui, view: &View<'_>, t: &Tokens, acts: &mut Vec<Act>) {
         if big(ui, Icon::Todo, crate::tl_id!("ui.to_do_tag_2"), crate::tl_id!("ui.a_to_do_box_on_this_line_ctrl_1"), t).clicked() {
             acts.push(Act::Block("todo"));
         }
-        if big(ui, Icon::Search, crate::tl_id!("ui.find_tags_3"), crate::tl_id!("ui.not_built"), t).clicked() {
-            acts.push(Act::NotBuilt("Find Tags"));
+        if big(ui, Icon::Search, crate::tl_id!("ui.find_tags_3"), crate::tl_id!("ui.find_tags"), t).clicked() {
+            acts.push(Act::FindTags);
         }
     });
     group(ui, crate::tl_id!("ui.email"), t, |ui| {

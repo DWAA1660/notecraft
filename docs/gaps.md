@@ -95,6 +95,9 @@ it is fixed and tested, not when it is promised.
   Ctrl+F1, or the chevron at the end of the tab names, folds the ribbon to its tab names and
   gives the page its room; a tab clicked while it is folded shows its commands over the page
   until one is used, the page is clicked or Escape is pressed. The choice is kept.
+- **Tags have a navigation summary.** Home > Find Tags lists tagged notes in the current
+  page, section, notebook or all open notebooks, with an incomplete To Do filter and refresh.
+  Custom tags and generated summary pages remain missing.
 - **Page zoom scales the document.** The View tab has large Zoom Out and Zoom In buttons,
   a percentage selector, 100% reset and Page Width; Ctrl+mouse wheel adjusts the same zoom.
   Text, pictures, diagrams, equations, handwriting, tables, container outlines and rule

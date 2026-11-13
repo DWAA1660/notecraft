@@ -15,6 +15,27 @@ use notecraft_model::PageFormat;
 use notecraft_model::justify::{Justified, Strength};
 use std::path::Path;
 
+fn reveal_id() -> egui::Id {
+    egui::Id::new("reveal-page-block")
+}
+
+/// Request a source block's actual rendered rectangle, including its enclosing scroll area.
+pub fn reveal_block(ctx: &egui::Context, page: &Path, block: usize) {
+    ctx.data_mut(|data| {
+        data.remove::<(egui::Rect, egui::Rect)>(reveal_id().with("geometry"));
+        data.insert_temp(reveal_id(), (page.to_path_buf(), block));
+    });
+}
+
+pub fn take_revealed(ctx: &egui::Context) -> Option<(egui::Rect, egui::Rect)> {
+    ctx.data_mut(|data| {
+        let id = reveal_id().with("geometry");
+        let geometry = data.get_temp::<(egui::Rect, egui::Rect)>(id);
+        data.remove::<(egui::Rect, egui::Rect)>(id);
+        geometry
+    })
+}
+
 /// Blocks to draw for the editable part of a page in `format`.
 pub fn blocks_for(format: PageFormat, body: &str) -> Vec<Block> {
     match format {
@@ -780,6 +801,14 @@ pub(crate) fn show_block_zoomed(
         if clicked {
             log::debug!("embedded object click: block={i} kind={kind} rect={:?} pointer={pointer:?}", response.rect);
         }
+    }
+    let reveal = ui.ctx().data(|data| data.get_temp::<(std::path::PathBuf, usize)>(reveal_id()));
+    if reveal.as_ref().is_some_and(|(path, block)| path == page_dir && *block == i) {
+        let viewport = ui.clip_rect();
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(reveal_id().with("geometry"), (response.rect, viewport));
+            data.remove::<(std::path::PathBuf, usize)>(reveal_id());
+        });
     }
     BlockResponse { response, task_set }
 }

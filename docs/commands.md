@@ -248,6 +248,16 @@ Parameters:
 - q (required): text to find
 - limit (optional): at most this many hits (default 40, at most 500)
 
+## `tag.find`
+
+Find tagged notes.
+
+Parameters:
+
+- scope (optional): page, section, notebook or all open notebooks (default all)
+- path (required except all): a page or node from which to find the requested scope
+- incomplete (optional): true for unchecked To Do items only (default false)
+
 ## `notebook.open`
 
 Open a notebook or initialize an empty folder (changes the tree).

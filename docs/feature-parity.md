@@ -20,7 +20,7 @@ side by side. Status words:
 | Authoring | Rich text | Partial | Both formats are written on in their finished look, block by block, with a real caret. A page whose markup cannot be written back exactly opens read-only rather than risking it. No font, size, colour or alignment controls yet. |
 | Authoring | Tables, lists, to-do, quotes, code | Done | The ribbon inserts them, the page draws them, and a to-do box ticks where it stands. |
 | Authoring | Right-to-left text | Partial | Arabic and Hebrew draw, and the page, the line and the run each take a direction, written into the text so it travels. A line that mixes the two directions is still drawn in one order, and the window is not mirrored. |
-| Authoring | Tags | Partial | Twelve tags, stored as plain text in the page and drawn as marks. No tag summary page. |
+| Authoring | Tags | Partial | Twelve tags, stored as plain text and drawn as marks. Find Tags lists notes by page, section, notebook or all open notebooks, filters incomplete tasks and navigates to the line. No custom tags or generated summary page. |
 | Authoring | Equations | Done | KaTeX-style TeX drawn natively in real maths fonts, with a gallery on the Insert tab. A formula the engine cannot take stays visible as text. `how-to/write-equations.md`. |
 | Authoring | Diagrams (Mermaid) | Partial | Drawn in the page (flowcharts, sequence, class, state, ER, Gantt, mind maps, pie, bar and line, quadrant), in both page formats; a click opens the source, and the code view shows it as text. `how-to/draw-diagrams.md`. |
 | Authoring | Free-form canvas boxes | Later | Not representable in Markdown. |

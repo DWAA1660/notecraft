@@ -23,6 +23,7 @@ pub enum Output {
     Versions(Vec<Version>),
     Recycled(Vec<Recycled>),
     Hits(Vec<Hit>),
+    Tags(Vec<search::TagHit>),
     Report(Report),
     Count(usize),
 }
@@ -205,6 +206,43 @@ fn search_query(s: &mut Session, p: &Params) -> Result<Output, EngineError> {
     // Every open notebook, the ones opened from another folder too: the window calls this
     // Search all pages (issue #127).
     Ok(Output::Hits(search::search_in(s.root(), s.opened_elsewhere(), req(p, "q")?, limit)))
+}
+
+fn tag_find(s: &mut Session, p: &Params) -> Result<Output, EngineError> {
+    let incomplete = match p.get("incomplete").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        _ => return Err(EngineError::BadParam("incomplete must be true or false".into())),
+    };
+    let scope = p.get("scope").map(String::as_str).unwrap_or("all");
+    let kind = match scope {
+        "all" => None,
+        "page" => Some(NodeKind::Page),
+        "section" => Some(NodeKind::Section),
+        "notebook" => Some(NodeKind::Notebook),
+        _ => return Err(EngineError::BadParam("scope must be page, section, notebook or all".into())),
+    };
+    let within = if let Some(kind) = kind {
+        let mut path = s.resolve(req(p, "path")?)?;
+        let root = s
+            .tree()
+            .iter()
+            .map(|notebook| notebook.path.clone())
+            .find(|root| path.starts_with(root))
+            .ok_or_else(|| EngineError::BadParam("tag scope must be in an open notebook".into()))?;
+        loop {
+            if tree::read_node(&path).is_some_and(|info| info.kind == kind) {
+                break;
+            }
+            if scope == "page" || path == root || !path.pop() {
+                return Err(EngineError::BadParam(format!("tag scope has no {}", kind.label().to_lowercase())));
+            }
+        }
+        Some(path)
+    } else {
+        None
+    };
+    Ok(Output::Tags(search::find_tags(s.tree(), within.as_deref(), scope == "page", incomplete)?))
 }
 
 fn notebook_check(s: &mut Session, p: &Params) -> Result<Output, EngineError> {
@@ -543,6 +581,13 @@ blocks (optional): the justified paragraphs' positions among the page's blocks, 
         run: search_query,
     },
     CommandSpec {
+        id: "tag.find",
+        label: "Find tagged notes",
+        params: "scope (optional): page, section, notebook or all open notebooks (default all)\npath (required except all): a page or node from which to find the requested scope\nincomplete (optional): true for unchecked To Do items only (default false)",
+        changes_tree: false,
+        run: tag_find,
+    },
+    CommandSpec {
         id: "notebook.open",
         label: "Open a notebook or initialize an empty folder",
         params: "path (required): a notebook folder anywhere on this machine, or an empty folder to initialize as a notebook named after the folder. The notebooks already open stay open, and this one is opened again next time",
@@ -653,6 +698,91 @@ mod tests {
             assert!(!c.label.is_empty());
             assert!(c.id.contains('.'), "ids are namespaced: {}", c.id);
         }
+    }
+
+    #[test]
+    fn tag_find_reads_structured_tags_in_both_formats_and_filters_completed_tasks() {
+        let t = TempDir::new("engine-find-tags");
+        let mut s = session(&t);
+        let nb = path_of(s.run("notebook.create", &p(&[("name", "Notes"), ("empty", "true")])).expect("notebook"));
+        let section = ops::create_node(&nb, "Work", NodeKind::Section, None, &s.settings).expect("section");
+        for format in PageFormat::ALL {
+            let dir = ops::create_node(&section, format.id(), NodeKind::Page, Some(format), &s.settings).expect("page");
+            let blocks = notecraft_formats::markdown::parse(
+                "- [ ] Book train\n- [x] Done task\n\n#important Review **proposal**\n\n`#idea inline code is not a tag`\n\n```text\n#idea not a real tag\n```\n",
+            );
+            let body = match format {
+                PageFormat::Html => notecraft_formats::render::blocks_to_html(&blocks),
+                PageFormat::Cmgfm => notecraft_formats::render::blocks_to_markdown(&blocks),
+            };
+            page::save_body(&dir, &body).expect("body");
+        }
+        let all = crate::output_json(&s.run("tag.find", &p(&[])).expect("structured tag summary"));
+        let hits = all.as_array().expect("tag entries");
+        assert_eq!(hits.len(), 6, "three actual tags per format, not the code literal: {all}");
+        assert_eq!(hits.iter().filter(|h| h["tag"] == "important" && h["text"] == "Review proposal").count(), 2);
+        assert!(hits.iter().all(|h| h["section"] == "Work" && h["notebook"] == "Notes"));
+        let pending = crate::output_json(&s.run("tag.find", &p(&[("incomplete", "true")])).expect("pending tasks"));
+        assert_eq!(pending.as_array().expect("entries").len(), 2);
+        assert!(pending.as_array().expect("entries").iter().all(|h| h["tag"] == "todo" && h["done"] == false && h["text"] == "Book train"));
+    }
+
+    #[test]
+    fn tag_find_scopes_use_real_ownership_and_only_open_notebooks() {
+        let t = TempDir::new("engine-tag-scopes");
+        let mut s = session(&t);
+        let mut make_notebook = |name: &str| path_of(s.run("notebook.create", &p(&[("name", name), ("empty", "true")])).expect("notebook"));
+        let first = make_notebook("First");
+        let second = make_notebook("Second");
+        let a = ops::create_node(&first, "A", NodeKind::Section, None, &s.settings).expect("section A");
+        let b = ops::create_node(&first, "B", NodeKind::Section, None, &s.settings).expect("section B");
+        let c = ops::create_node(&second, "C", NodeKind::Section, None, &s.settings).expect("section C");
+        let page = ops::create_node(&a, "Page", NodeKind::Page, None, &s.settings).expect("page");
+        let subpage = ops::create_node(&page, "Child", NodeKind::Page, None, &s.settings).expect("subpage");
+        let other = ops::create_node(&b, "Other", NodeKind::Page, None, &s.settings).expect("other section");
+        let other_notebook = ops::create_node(&c, "Other", NodeKind::Page, None, &s.settings).expect("other notebook");
+        let away = ops::create_notebook(&t.path().join("elsewhere"), "Away", None, &s.settings).expect("external notebook");
+        let away_section = ops::create_node(&away, "Remote", NodeKind::Section, None, &s.settings).expect("remote section");
+        let away_page = ops::create_node(&away_section, "Outside", NodeKind::Page, None, &s.settings).expect("external page");
+        for dir in [&page, &subpage, &other, &other_notebook, &away_page] {
+            page::save_body(dir, "<p>#important Tagged note</p>").expect("tag");
+        }
+        s.open_notebook(&away).expect("open external");
+        let count = |s: &mut Session, scope: &str| {
+            let out = crate::output_json(&s.run("tag.find", &p(&[("scope", scope), ("path", &page.to_string_lossy())])).expect("scope"));
+            out.as_array().expect("entries").len()
+        };
+        assert_eq!(count(&mut s, "page"), 1, "exact page excludes its sub-pages");
+        assert_eq!(count(&mut s, "section"), 2);
+        assert_eq!(count(&mut s, "notebook"), 3);
+        assert_eq!(count(&mut s, "all"), 5, "includes the externally opened notebook");
+        assert!(s.close_notebook(&second));
+        assert_eq!(count(&mut s, "all"), 4, "closed notebook is excluded");
+        let open_snapshot = s.tree().to_vec();
+        std::fs::remove_dir_all(&away).expect("remove only this test's external notebook");
+        let canonical_page = std::fs::canonicalize(&page).expect("page identity");
+        assert_eq!(
+            search::find_tags(&open_snapshot, Some(&canonical_page), true, false).expect("page query ignores disconnected unrelated notebook").len(),
+            1
+        );
+        assert!(search::find_tags(&open_snapshot, None, false, false).is_err(), "an all-notebook query must report the disconnected root");
+        assert!(s.run("tag.find", &p(&[])).is_err(), "the command must also report a disconnected open notebook");
+        assert!(s.run("tag.find", &p(&[("scope", "section"), ("path", &second.to_string_lossy())])).is_err());
+        for params in [p(&[("scope", "unknown")]), p(&[("scope", "page")]), p(&[("incomplete", "perhaps")])] {
+            assert!(s.run("tag.find", &params).is_err());
+        }
+    }
+
+    #[test]
+    fn tag_find_reports_unreadable_pages_instead_of_an_incomplete_summary() {
+        let t = TempDir::new("engine-tag-unreadable");
+        let mut s = session(&t);
+        let nb = path_of(s.run("notebook.create", &p(&[("name", "Notes")])).expect("notebook"));
+        let section = tree::child_dirs(&nb).into_iter().next().expect("first section");
+        let page = tree::child_dirs(&section).into_iter().next().expect("first page");
+        let (_, file) = tree::page_file(&page).expect("page file");
+        std::fs::write(file, [0xff, 0xfe, 0xff]).expect("unreadable UTF8 test data");
+        assert!(s.run("tag.find", &p(&[])).is_err(), "a corrupt page cannot disappear into an empty successful summary");
     }
 
     #[test]

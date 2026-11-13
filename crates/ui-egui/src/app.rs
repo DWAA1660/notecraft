@@ -756,6 +756,8 @@ pub struct NoteCraftApp {
     search: String,
     searched: String,
     hits: Vec<Hit>,
+    tags: Option<crate::tag_summary::Summary>,
+    tag_target: Option<usize>,
     cursor: usize,
     tokens: Tokens,
     mode_pref: ModePref,
@@ -927,6 +929,8 @@ impl NoteCraftApp {
             search: String::new(),
             searched: String::new(),
             hits: Vec::new(),
+            tags: None,
+            tag_target: None,
             cursor: 0,
             tokens: Theme::DEFAULT.tokens(),
             mode_pref,
@@ -3564,6 +3568,11 @@ impl NoteCraftApp {
     fn ribbon_act(&mut self, act: ribbon::Act) {
         match act {
             ribbon::Act::File => self.backstage = Some("Info"),
+            ribbon::Act::FindTags => {
+                let mut summary = crate::tag_summary::Summary::default();
+                self.refresh_tags_summary(&mut summary);
+                self.tags = Some(summary);
+            }
             ribbon::Act::PageVersions => {
                 self.save_now();
                 if let Some(page) = self.editor.as_ref().map(|e| e.dir.clone()) {
@@ -5483,6 +5492,81 @@ impl NoteCraftApp {
         });
         if let Some(language) = picked {
             self.set_ui_language(language);
+        }
+    }
+
+    fn refresh_tags_summary(&mut self, summary: &mut crate::tag_summary::Summary) {
+        self.save_now();
+        if self.editor.as_ref().is_some_and(|ed| ed.dirty_since.is_some()) {
+            summary.fail(self.status().to_owned());
+            return;
+        }
+        summary.refresh(&mut self.session, self.editor.as_ref().map(|ed| ed.dir.as_path()));
+    }
+
+    fn tags_panel(&mut self, ui: &mut Ui) {
+        let Some(mut summary) = self.tags.take() else { return };
+        let page = self.editor.as_ref().map(|e| e.dir.clone());
+        if summary.follows_page() && summary.page != page {
+            self.refresh_tags_summary(&mut summary);
+        }
+        let action = crate::tag_summary::show(ui, &mut summary, &self.tokens);
+        if action.refresh {
+            self.refresh_tags_summary(&mut summary);
+            ui.ctx().request_repaint();
+        }
+        if let Some(target) = action.target {
+            self.save_now();
+            if self.editor.as_ref().is_some_and(|ed| ed.dirty_since.is_some()) {
+                summary.fail(self.status().to_owned());
+            } else {
+                self.open_path(&target.path.to_string_lossy());
+                self.set_show_source(false);
+                self.pointer = ribbon::Pointer::Write;
+                if let Some(ed) = self.editor.as_mut() {
+                    if ed.dir == target.path && ed.blocks.get(target.block).is_some_and(|block| target.matches_block(block)) {
+                        ed.caret = None;
+                        self.tag_target = Some(target.block);
+                        preview::reveal_block(ui.ctx(), &ed.dir, target.block);
+                    } else {
+                        self.complain(crate::tl_id!("ui.tagged_note_changed"));
+                    }
+                }
+            }
+            ui.ctx().request_repaint();
+        }
+        if !action.close {
+            self.tags = Some(summary);
+        }
+    }
+
+    fn finish_tag_navigation(&mut self, ctx: &Context) {
+        if self.tag_target.is_none() {
+            return;
+        }
+        let Some((target, viewport)) = preview::take_revealed(ctx) else { return };
+        // A note may be anywhere on the sheet, beyond either visible edge.
+        // Pan the view from the rendered geometry without moving its container.
+        let viewport = viewport.shrink(12.0);
+        let dx = if target.left() < viewport.left() || target.right() > viewport.right() { viewport.center().x - target.center().x } else { 0.0 };
+        let dy = if target.top() < viewport.top() || target.bottom() > viewport.bottom() { viewport.center().y - target.center().y } else { 0.0 };
+        self.canvas_pan += vec2(dx, dy);
+        let Some(block) = self.tag_target.take() else { return };
+        if let Some(ed) = self.editor.as_mut()
+            && ed.writable
+            && let Some(content) = ed.blocks.get(block).filter(|b| pageedit::is_writable(b))
+        {
+            ed.caret = Some(pageedit::Caret {
+                block,
+                text: pageedit::caret_text(content),
+                focus: true,
+                selection: (0, 0),
+                place: None,
+                cell: None,
+                span: None,
+                inline: None,
+            });
+            ctx.request_repaint();
         }
     }
 
@@ -7896,7 +7980,9 @@ impl NoteCraftApp {
         self.top_bar(ui);
         self.status_bar(ui);
         self.side_panel(ui);
+        self.tags_panel(ui);
         self.central(ui);
+        self.finish_tag_navigation(ctx);
         self.search_popup(ctx);
         self.dialogs(ctx);
         self.import_progress(ctx);
