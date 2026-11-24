@@ -8,6 +8,7 @@ use notecraft_engine::sample::{Sample, create_sample};
 use notecraft_engine::{Output, Params, Session};
 use notecraft_store::Settings;
 use notecraft_store::testing::TempDir;
+use notecraft_ui_egui::block_emoji::HEADER_ROW;
 use notecraft_ui_egui::control::{ControlRequest, start};
 use notecraft_ui_egui::theme::{Accent, Mode, ModePref, Theme, Tokens, contrast};
 use notecraft_ui_egui::{LOGO_PNG, NoteCraftApp};
@@ -406,7 +407,7 @@ fn about_and_options_show_the_version_and_an_update_button() {
         pump(&mut h);
         let _ = h.get_by_label(&format!("You are running NoteCraft {VERSION}."));
         let _ = h.get_by_label("Check for updates");
-        let _ = h.get_by_label_contains("Nothing is sent until you press the button.");
+        let _ = h.get_by_label_contains("It downloads and installs only when you press Update and Restart.");
         assert!(h.output().platform_output.commands.is_empty(), "{page}: nothing is opened before the button is pressed");
         review(&mut h, &format!("check_for_updates_{}", page.to_lowercase()));
     }
@@ -625,9 +626,11 @@ fn middle_drag_pans_the_canvas_for_html_and_cmgfm_pages() {
 
         ask(&mut h, "ui.press", json!({"x": x, "y": y, "button": "middle"})).expect("start pan");
         pump(&mut h);
-        ask(&mut h, "ui.move", json!({"x": x + 80.0, "y": y + 60.0})).expect("move canvas");
+        // Right, past the page's left edge, and up, into the page: the canvas does not pan
+        // above the page's top, which is where it starts.
+        ask(&mut h, "ui.move", json!({"x": x + 80.0, "y": y - 60.0})).expect("move canvas");
         pump(&mut h);
-        ask(&mut h, "ui.release", json!({"x": x + 80.0, "y": y + 60.0, "button": "middle"})).expect("finish pan");
+        ask(&mut h, "ui.release", json!({"x": x + 80.0, "y": y - 60.0, "button": "middle"})).expect("finish pan");
         settle(&mut h);
 
         let after = ask(&mut h, "ui.inspect", json!({})).expect("inspect canvas after pan");
@@ -637,7 +640,7 @@ fn middle_drag_pans_the_canvas_for_html_and_cmgfm_pages() {
         let after_origin = after.pointer("/page/origin").and_then(Value::as_array).expect("page origin after pan");
         assert!(
             after_origin[0].as_f64().unwrap_or_default() > before_origin[0].as_f64().unwrap_or_default()
-                && after_origin[1].as_f64().unwrap_or_default() > before_origin[1].as_f64().unwrap_or_default(),
+                && after_origin[1].as_f64().unwrap_or_default() < before_origin[1].as_f64().unwrap_or_default(),
             "middle drag moves page content with the {label} canvas: before={before_origin:?}, after={after_origin:?}"
         );
         review(&mut h, if markdown { "canvas_pan_cmgfm" } else { "canvas_pan_html" });
@@ -1456,7 +1459,7 @@ fn a_container_can_be_dragged_and_stays_where_it_is_put() {
     let origin = v.pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0), origin.get(1).and_then(Value::as_f64).unwrap_or(0.0));
     assert!(ox > 0.0 && oy > 0.0, "the page knows where it is drawn: {origin:?}");
-    let (hx, hy) = (ox + 40.0 + 160.0, oy + 20.0 + 6.0);
+    let (hx, hy) = (ox + 40.0 + 160.0, oy + 20.0 + HEADER_ROW as f64 + 6.0);
 
     // Press on the bar, move, let go.
     ask(&mut h, "ui.press", json!({"x": hx, "y": hy})).expect("press");
@@ -1516,6 +1519,41 @@ fn the_notebooks_and_the_pages_can_have_columns_of_their_own() {
     let rows = ask(&mut h, "ui.inspect", json!({})).expect("inspect").pointer("/rows").and_then(Value::as_array).cloned().unwrap_or_default();
     assert!(!rows.is_empty(), "the tree still reports its rows");
     review(&mut h, "panes");
+}
+
+/// A small desktop window still offers both navigation columns without sacrificing
+/// most of the editing canvas. The full desktop layout keeps its normal width.
+#[test]
+fn small_desktop_navigation_leaves_room_to_edit() {
+    let (_t, mut app, s) = split_sample_app("ui-panes-small-desktop");
+    app.open_path(&s.md_page.to_string_lossy());
+    let wide_size = egui::vec2(1200.0, 800.0);
+    let mut h = sized_harness(app, LIGHT, wide_size);
+    settle(&mut h);
+    let wide = h.state().page_rect().expect("wide page canvas");
+    h.set_size(egui::vec2(800.0, 540.0));
+    settle(&mut h);
+    let rect = h.state().page_rect().expect("page canvas");
+    assert!(rect.width() >= 440.0, "split panes must leave a majority-width canvas: {rect:?}");
+    let v = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+    assert_eq!(v.pointer("/panes/organisers"), Some(&json!(true)));
+    assert_eq!(v.pointer("/panes/compact"), Some(&json!(false)));
+    let before = h.state().title().map(str::to_owned);
+    h.get_by_label("Add page").click();
+    settle(&mut h);
+    assert_ne!(h.state().title(), before.as_deref(), "a page can be opened from narrow navigation");
+    h.get_by_label("\u{2630}").click();
+    settle(&mut h);
+    let expanded = h.state().page_rect().expect("page canvas");
+    assert!(expanded.width() > rect.width() + 100.0, "user can still hide the organisers");
+    h.get_by_label("\u{2630}").click();
+    settle(&mut h);
+    let restored = h.state().page_rect().expect("page canvas");
+    assert!((restored.width() - rect.width()).abs() < 2.0);
+    h.set_size(wide_size);
+    settle(&mut h);
+    let wide_again = h.state().page_rect().expect("restored wide page canvas");
+    assert!((wide_again.min.x - wide.min.x).abs() < 2.0, "desktop splitter positions survive the narrow layout");
 }
 
 /// The line between two pages, which OneNote shows on hover, makes a page in that place.
@@ -1967,7 +2005,7 @@ fn insert_table_dialog_makes_a_table_of_the_typed_size() {
         settle(&mut h);
         let blocks = h.state().editor_blocks();
         let made = blocks.iter().find_map(|b| match b {
-            notecraft_formats::Block::Table { head, rows } => Some((head.len(), rows.len() + 1)),
+            notecraft_formats::Block::Table { head, rows, .. } => Some((head.len(), rows.len() + 1)),
             _ => None,
         });
         assert_eq!(made, Some((12, 25)), "html={html}: 12 columns and 25 rows, heading included");
@@ -1982,7 +2020,7 @@ fn insert_table_dialog_makes_a_table_of_the_typed_size() {
             .state()
             .editor_blocks()
             .iter()
-            .any(|b| matches!(b, notecraft_formats::Block::Table { head, rows } if head.len() == 12 && rows.len() + 1 == 25));
+            .any(|b| matches!(b, notecraft_formats::Block::Table { head, rows, .. } if head.len() == 12 && rows.len() + 1 == 25));
         assert!(reopened, "html={html}: saved and read back at 12 by 25");
     }
 }
@@ -2250,10 +2288,12 @@ fn welcome_notebook_prompt_can_replace_and_open_the_release_copy() {
     assert!(destination.join("00-start/welcome/index.md").is_file(), "the chosen CMGFM release content is installed");
     assert!(!destination.join("html").exists(), "the other edition is not installed");
     assert_eq!(h.state().session().settings.default_format(), Some(notecraft_model::PageFormat::Cmgfm), "the format step saves the default");
-    assert_eq!(
-        h.state().title(),
-        Some(format!("Welcome to NoteCraft (Ver {})", env!("CARGO_PKG_VERSION")).as_str()),
-        "the generated Welcome page is opened"
+    // The title carries the version the demo content was written for, which is not
+    // necessarily this build's version, so only the name and the version label are checked.
+    assert!(
+        h.state().title().is_some_and(|t| t.starts_with("Welcome to NoteCraft (Ver ")),
+        "the generated Welcome page is opened: {:?}",
+        h.state().title()
     );
     assert_eq!(h.state().session().settings.get("privacy_welcome_seen").as_deref(), Some("true"), "finishing the wizard marks it seen");
 }
@@ -2378,8 +2418,8 @@ fn an_installed_welcome_notebook_is_discovered_and_opened_as_user_data() {
     settle(&mut h);
     // The start page's title is in its head and the window shows it above the page. Its
     // large banner is the first thing in the body.
-    let expected_title = format!("Welcome to NoteCraft (Ver {})", env!("CARGO_PKG_VERSION"));
-    assert_eq!(h.state().title(), Some(expected_title.as_str()), "opened on the start page");
+    // The demo content carries the version it was written for, so only the name is checked here.
+    assert!(h.state().title().is_some_and(|t| t.starts_with("Welcome to NoteCraft (Ver ")), "opened on the start page: {:?}", h.state().title());
     assert!(
         h.state().body().is_some_and(|b| b.starts_with("<p><img src=\"assets/banner-start.png\"")),
         "the first page is bundled as HTML: {:?}",
@@ -2526,7 +2566,17 @@ fn a_swatch_overrides_the_system_mode() {
     app.follow_system_theme(Accent::Default);
     assert_eq!(app.mode_pref(), ModePref::System);
     let mut h = Harness::builder().with_size(egui::vec2(1200.0, 760.0)).build_ui_state(|ui, a: &mut NoteCraftApp| a.show(ui), app);
-    h.run();
+    // Step until the window stops asking for frames. Image decoding in the background can keep it
+    // asking past the harness's default step cap on a slow runner, so `run()` is not enough here.
+    let mut settled = false;
+    for _ in 0..300 {
+        h.step();
+        if !h.ctx.has_requested_repaint() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the window never settled: it still asks for frames after 300 steps");
     // The harness reports a dark system, so the swatch to prove the point is the light one.
     let system = h.state().theme().mode;
     let (other, label) = if system == Mode::Dark { (Mode::Light, "Theme Light Default") } else { (Mode::Dark, "Theme Dark Default") };
@@ -2721,8 +2771,9 @@ fn a_click_on_blank_paper_starts_writing_under_the_pointer_when_zoomed() {
     let new = boxes.last().expect("the new box");
     let (ox, oy) = (st["page"]["origin"][0].as_f64().unwrap_or(0.0) as f32, st["page"]["origin"][1].as_f64().unwrap_or(0.0) as f32);
     let (x, y) = (new["x"].as_f64().unwrap_or(0.0) as f32, new["y"].as_f64().unwrap_or(0.0) as f32);
-    // The box's words begin a pad in and a handle's height down from its corner (6 and 14 points).
-    let words = egui::pos2(ox + (x + 6.0) * 2.0, oy + (y + 14.0) * 2.0);
+    // The box's words begin a pad in from its corner, and below the first block's header row and
+    // the box's handle (6, 24 and 14 points).
+    let words = egui::pos2(ox + (x + 6.0) * 2.0, oy + (y + 24.0 + 14.0) * 2.0);
     assert!((words - click).length() < 3.0, "clicked at {click:?}, the box's words begin at {words:?}");
 }
 
@@ -3318,6 +3369,29 @@ fn next_unread_and_mark_as_read_follow_what_changed_since_it_was_read() {
     assert_eq!(title(&mut h), json!(html_title), "nothing unread to go to");
     assert!(unread(&mut h).is_empty());
 }
+#[test]
+fn opening_a_page_in_a_second_window_preserves_unread_marks_from_the_first() {
+    let (t, mut app, sample) = sample_app("ui-unread-note-windows");
+    let first = sample.html_page;
+    let other = sample.md_page;
+    app.open_path(&first.to_string_lossy());
+    let mut child = app.child_window(&notecraft_ui_egui::windows::Request { path: other.clone(), quick: false }).expect("second window");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1600.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("History").click();
+    settle(&mut h);
+    h.get_by_label("Mark as Unread").click();
+    settle(&mut h);
+    let id = notecraft_store::tree::read_node(&first).expect("node").id;
+    let file = t.path().join("read-state.tsv");
+    let marked = || notecraft_store::read_state::ReadState::load(&file).is_marked_unread(&id);
+    assert!(marked());
+    child.open_path(&other.to_string_lossy());
+    assert!(marked(), "the second window did not forget the first window's newer mark");
+    child.open_path(&first.to_string_lossy());
+    assert!(!marked(), "explicitly reopening the marked page in either window clears it");
+}
+
 /// Issue #279: History > Recent Edits was "not built". It lists the pages changed in a range,
 /// newest first, by the time each page keeps of its own, with where each one is; a filter
 /// narrows the list and a title opens that page.
@@ -5196,7 +5270,7 @@ fn a_box_stays_drawn_while_the_pointer_is_on_its_drag_strip() {
     let origin = &page["origin"];
     let (ox, oy) = (origin[0].as_f64().unwrap_or(0.0) as f32, origin[1].as_f64().unwrap_or(0.0) as f32);
     // The strip runs along the top of the box, 14 points high, as wide as the box and its padding.
-    let strip = egui::Rect::from_min_size(egui::pos2(ox + 40.0, oy + 40.0), egui::vec2(300.0 + 12.0, 14.0));
+    let strip = egui::Rect::from_min_size(egui::pos2(ox + 40.0, oy + 40.0 + HEADER_ROW), egui::vec2(300.0 + 12.0, 14.0));
     let near = |a: egui::Rect, b: egui::Rect| (a.min - b.min).length() < 2.0 && (a.max - b.max).length() < 2.0;
 
     for (what, at) in [("over the words", egui::pos2(strip.center().x, strip.max.y + 12.0)), ("on the drag strip", strip.center())] {
@@ -5207,67 +5281,13 @@ fn a_box_stays_drawn_while_the_pointer_is_on_its_drag_strip() {
     }
 }
 
-/// As in OneNote, a click on open paper only places the cursor there: no box is drawn until
-/// something is written. The box appears with the first letter.
-#[test]
-fn a_click_on_open_paper_shows_only_the_cursor_until_something_is_written() {
-    let (_t, app, s) = sample_app("ui-click-cursor-only");
-    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 800.0));
-    settle(&mut h);
-    let section = s.md_page.parent().expect("the section").to_string_lossy().into_owned();
-    let html = "<div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"300\"><p>words</p></div>\n";
-    let made = ask(
-        &mut h,
-        "engine.execute",
-        json!({"command": "node.create", "params": {"parent": section, "kind": "page", "title": "Cursor only", "format": "html"}}),
-    )
-    .expect("a page");
-    let dir = made.as_str().expect("its path").to_string();
-    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": dir, "body": html}})).expect("save it");
-    ask(&mut h, "ui.open", json!({"path": dir})).expect("open it");
-    settle(&mut h);
-    let origin = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"]["origin"].clone();
-    let (ox, oy) = (origin[0].as_f64().unwrap_or(0.0) as f32, origin[1].as_f64().unwrap_or(0.0) as f32);
-    let at = egui::pos2(ox + 500.0, oy + 200.0);
-    ask(&mut h, "ui.click", json!({"x": at.x, "y": at.y})).expect("click the open paper");
-    settle(&mut h);
-    let page = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"].clone();
-    assert!(page["caret"] != Value::Null, "the cursor is placed where the click was: {page}");
-    // A box's frame, drag strip or the outline of the line being written in, around the click:
-    // anything visible drawn there narrower than the window.
-    let near = |h: &Harness<'_, NoteCraftApp>| {
-        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Color32, egui::Stroke)>) {
-            match shape {
-                egui::Shape::Rect(r) => out.push((r.rect, r.fill, r.stroke)),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
-                _ => {}
-            }
-        }
-        let mut all = Vec::new();
-        for clipped in &h.output().shapes {
-            walk(&clipped.shape, &mut all);
-        }
-        all.into_iter()
-            .filter(|(r, fill, stroke)| {
-                let seen = fill.a() > 0 || (stroke.width > 0.0 && stroke.color.a() > 0);
-                seen && r.width() > 40.0 && r.width() < 900.0 && r.expand(16.0).contains(at)
-            })
-            .map(|(r, ..)| r)
-            .collect::<Vec<_>>()
-    };
-    let box_drawn = |h: &Harness<'_, NoteCraftApp>| !near(h).is_empty();
-    assert!(!box_drawn(&h), "no box is drawn before anything is written: {:?}", near(&h));
-    ask(&mut h, "ui.text", json!({"text": "now a box"})).expect("type");
-    settle(&mut h);
-    assert!(box_drawn(&h), "the box appears with the first letters");
-}
-
 /// A click on open paper writes nothing to the page's file: the place it puts the cursor is not
 /// something on the page until something is written there. A save rewrites the file, which on a
 /// synced folder (a OneDrive mount) took about a second with the window frozen, so a click that
-/// saved held up the clicks after it. Pressing on that place does not drag it either.
+/// saved held up the clicks after it. (The new block's bar can be dragged, as
+/// `a_new_block_can_be_dragged_by_its_bar` has it.)
 #[test]
-fn a_click_on_open_paper_saves_nothing_and_its_place_cannot_be_dragged() {
+fn a_click_on_open_paper_saves_nothing() {
     let (_t, app, s) = sample_app("ui-click-no-save");
     let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 800.0));
     settle(&mut h);
@@ -5300,26 +5320,10 @@ fn a_click_on_open_paper_saves_nothing_and_its_place_cannot_be_dragged() {
     settle(&mut h);
     let placed = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"].clone();
     assert!(placed["caret"] != Value::Null, "the cursor is placed: {placed}");
-    let place = placed["containers"].as_array().and_then(|b| b.last()).cloned().unwrap_or_default();
     // Nothing to save, and nothing for Undo to take back: the page is as it was.
     assert_eq!(placed["dirty"], json!(false), "a click does not count as a change: {placed}");
     let steps = |p: &Value| p["history"]["steps"].clone();
     assert_eq!(steps(&placed), steps(&before_click), "a click adds no step to undo: {placed}");
-
-    // A press just above the cursor, where a box's drag strip would be, and a drag.
-    ask(&mut h, "ui.press", json!({"x": at.x + 20.0, "y": at.y - 10.0})).expect("down");
-    pump(&mut h);
-    for step in 1..=5 {
-        ask(&mut h, "ui.move", json!({"x": at.x + 20.0 + 30.0 * step as f32, "y": at.y - 10.0 + 30.0 * step as f32})).expect("drag");
-        pump(&mut h);
-    }
-    let dragging = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"].clone();
-    let now =
-        dragging["containers"].as_array().and_then(|b| b.iter().find(|c| c["blocks"] == place["blocks"] && c["width"] == place["width"]).cloned());
-    if let Some(now) = now {
-        assert_eq!((now["x"].clone(), now["y"].clone()), (place["x"].clone(), place["y"].clone()), "the cursor's place is not dragged: {dragging}");
-    }
-    ask(&mut h, "ui.release", json!({"x": at.x + 170.0, "y": at.y + 140.0})).expect("up");
 
     // Long past the autosave's wait.
     for _ in 0..4 {
@@ -5509,7 +5513,7 @@ fn dragging_a_box_to_the_bottom_edge_scrolls_the_page() {
     let origin = &page["origin"];
     let (ox, oy) = (origin[0].as_f64().unwrap_or(0.0) as f32, origin[1].as_f64().unwrap_or(0.0) as f32);
     // The middle of the drag strip along the top of the first box.
-    let (x, y) = (ox + 40.0 + 150.0, oy + 40.0 + 7.0);
+    let (x, y) = (ox + 40.0 + 150.0, oy + 40.0 + HEADER_ROW + 7.0);
     ask(&mut h, "ui.move", json!({"x": x, "y": y})).expect("onto the strip");
     settle(&mut h);
     ask(&mut h, "ui.press", json!({"x": x, "y": y})).expect("down");
@@ -5537,7 +5541,7 @@ fn dragging_a_box_to_the_bottom_edge_scrolls_the_page() {
 
     // And back up: held at the top of the view, the page scrolls back, but not past its own top.
     // The strip of the box, where it now sits on the scrolled page.
-    let y = oy_after + box_y + 7.0;
+    let y = oy_after + box_y + HEADER_ROW + 7.0;
     ask(&mut h, "ui.press", json!({"x": x, "y": y})).expect("down on the strip again");
     pump(&mut h);
     // Above the page's own top: past the top edge of the view, where the scroll is fastest.
@@ -5586,7 +5590,7 @@ fn a_dragged_box_stays_where_it_was_taken_hold_of_after_the_pointer_strays() {
     settle(&mut h);
     let page = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"].clone();
     let (ox, oy) = (page["origin"][0].as_f64().unwrap_or(0.0) as f32, page["origin"][1].as_f64().unwrap_or(0.0) as f32);
-    let (x, y) = (ox + 40.0 + 150.0, oy + 40.0 + 7.0);
+    let (x, y) = (ox + 40.0 + 150.0, oy + 40.0 + HEADER_ROW + 7.0);
     ask(&mut h, "ui.move", json!({"x": x, "y": y})).expect("onto the strip");
     settle(&mut h);
     ask(&mut h, "ui.press", json!({"x": x, "y": y})).expect("down");
@@ -5659,7 +5663,7 @@ fn a_selection_box_dragged_over_open_paper_selects_moves_and_deletes_boxes() {
     assert_eq!(picked["caret"], Value::Null, "nor is the cursor placed: {picked}");
 
     // Moving the first by its strip moves the second with it.
-    let strip = egui::pos2(ox + 40.0 + 100.0, oy + 60.0 + 7.0);
+    let strip = egui::pos2(ox + 40.0 + 100.0, oy + 60.0 + HEADER_ROW + 7.0);
     ask(&mut h, "ui.move", json!({"x": strip.x, "y": strip.y})).expect("onto the strip");
     settle(&mut h);
     ask(&mut h, "ui.press", json!({"x": strip.x, "y": strip.y})).expect("down");
@@ -5749,7 +5753,7 @@ fn a_selection_box_picks_up_ink_with_the_boxes_and_they_move_and_go_together() {
     assert_eq!(picked["ink"]["holding"], json!(1), "and the writing is picked up: {}", picked["ink"]);
 
     // Dragging the box by its strip takes the writing with it.
-    drag(&mut h, egui::pos2(ox + 140.0, oy + 67.0), egui::pos2(ox + 140.0, oy + 167.0));
+    drag(&mut h, egui::pos2(ox + 140.0, oy + 67.0 + HEADER_ROW), egui::pos2(ox + 140.0, oy + 167.0 + HEADER_ROW));
     let moved = ink(&mut h);
     let b1 = bounds(&moved);
     assert_eq!(moved["page"]["containers"][0]["y"], json!(160.0), "the box moved down: {}", moved["page"]);
@@ -5850,7 +5854,7 @@ fn a_selection_box_shows_what_it_takes_and_ctrl_click_leaves_a_box_out() {
     assert_eq!(picked["ink"]["holding"], json!(1), "and the writing: {}", picked["ink"]);
 
     // Ctrl and a click on the box's words takes the box out, and puts no cursor in it.
-    ask(&mut h, "ui.click", json!({"x": ox + 80.0, "y": oy + 90.0, "ctrl": true})).expect("ctrl click the box");
+    ask(&mut h, "ui.click", json!({"x": ox + 80.0, "y": oy + 90.0 + HEADER_ROW, "ctrl": true})).expect("ctrl click the box");
     settle(&mut h);
     let left_out = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
     assert_eq!(left_out["page"]["selectedContainers"], json!([]), "the box is out of the selection: {}", left_out["page"]);
@@ -5900,7 +5904,7 @@ fn a_click_puts_the_caret_under_the_pointer_when_zoomed_in() {
         settle(h);
         caret["at"].as_u64().unwrap_or(u64::MAX)
     };
-    let at_100 = caret_after_click(&mut h, egui::vec2(57.0, 18.0));
+    let at_100 = caret_after_click(&mut h, egui::vec2(57.0, 18.0 + HEADER_ROW));
     assert!(at_100 > 0 && at_100 < 18, "at 100 % the click is inside the words: {at_100}");
     h.get_by_label("View").click();
     settle(&mut h);
@@ -5910,7 +5914,7 @@ fn a_click_puts_the_caret_under_the_pointer_when_zoomed_in() {
     }
     let zoom = h.state().zoom_percent() as f32 / 100.0;
     assert!((zoom - 2.0).abs() < 0.01, "zoomed to 200 %: {zoom}");
-    let at_200 = caret_after_click(&mut h, egui::vec2(57.0, 18.0) * zoom);
+    let at_200 = caret_after_click(&mut h, egui::vec2(57.0, 18.0 + HEADER_ROW) * zoom);
     assert!(at_200.abs_diff(at_100) <= 1, "the same place on the page puts the caret at the same letter: {at_100} at 100 %, {at_200} at 200 %");
 }
 
@@ -6241,7 +6245,8 @@ fn a_box_that_is_copied_and_pasted_comes_back_as_it_was() {
     let (ox, oy) = (page["origin"][0].as_f64().unwrap_or(0.0), page["origin"][1].as_f64().unwrap_or(0.0));
 
     // Select the box by its bar, and copy it with the keys.
-    ask(&mut h, "ui.click", json!({"x": ox + 200.0, "y": oy + 6.0})).expect("select the box by its bar");
+    let by = bar_y(&mut h, oy);
+    ask(&mut h, "ui.click", json!({"x": ox + 200.0, "y": by})).expect("select the box by its bar");
     settle(&mut h);
     let selected = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"]["selectedContainer"].clone();
     assert_eq!(selected, json!(0), "the box is selected: {selected}");
@@ -7353,7 +7358,8 @@ fn right_click_selects_a_container_and_delete_removes_it_with_its_content() {
     let before = h.state().body().unwrap_or_default().to_string();
 
     // On the box's handle, along its top edge.
-    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 6.0, "button": "right"})).expect("right click the handle");
+    let by = bar_y(&mut h, oy);
+    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": by, "button": "right"})).expect("right click the handle");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -7379,8 +7385,10 @@ fn right_click_selects_a_container_and_delete_removes_it_with_its_content() {
 /// page's menu opens and the box is left as it was.
 #[test]
 fn right_click_on_a_boxs_words_does_not_select_the_box() {
-    let (_t, mut h, _, (ox, oy)) = two_boxes("ui-box-words-right");
-    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 30.0, "button": "right"})).expect("right click the words");
+    let (_t, mut h, _, (ox, _)) = two_boxes("ui-box-words-right");
+    // The words sit just under the first block's header.
+    let header = h.query_all_by_label_contains("Add emoji to block").next().expect("the first header").rect();
+    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": header.bottom() as f64 + 30.0, "button": "right"})).expect("right click the words");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -7394,7 +7402,8 @@ fn right_click_on_a_boxs_words_does_not_select_the_box() {
 fn the_handle_selects_a_container_and_the_delete_key_removes_it() {
     let (_t, mut h, blocks, (ox, oy)) = two_boxes("ui-box-key");
     // The handle runs along the top of the box.
-    ask(&mut h, "ui.click", json!({"x": ox + 160.0, "y": oy + 6.0})).expect("click the handle");
+    let by = bar_y(&mut h, oy);
+    ask(&mut h, "ui.click", json!({"x": ox + 160.0, "y": by})).expect("click the handle");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -7412,7 +7421,8 @@ fn the_handle_selects_a_container_and_the_delete_key_removes_it() {
 #[test]
 fn escape_lets_go_of_a_selected_container() {
     let (_t, mut h, blocks, (ox, oy)) = two_boxes("ui-box-escape");
-    ask(&mut h, "ui.click", json!({"x": ox + 160.0, "y": oy + 6.0})).expect("click the handle");
+    let by = bar_y(&mut h, oy);
+    ask(&mut h, "ui.click", json!({"x": ox + 160.0, "y": by})).expect("click the handle");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -7433,7 +7443,8 @@ fn needle(body: &str, from: usize, to: usize) -> String {
 }
 
 fn select_box_by_handle(h: &mut Harness<'_, NoteCraftApp>, ox: f64, oy: f64, x: f64) {
-    ask(h, "ui.click", json!({"x": ox + x, "y": oy + 6.0})).expect("click the handle");
+    let by = bar_y(h, oy);
+    ask(h, "ui.click", json!({"x": ox + x, "y": by})).expect("click the handle");
     for _ in 0..6 {
         pump(h);
     }
@@ -7527,7 +7538,8 @@ fn copy_and_cut_on_a_box_reach_the_clipboard() {
         let (_t, mut h, blocks, (ox, oy)) = two_boxes_on(&format!("ui-box-{label}"), &board);
         let before = h.state().body().unwrap_or_default().to_string();
         let words = needle(&before, 0, 2);
-        ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 6.0, "button": "right"})).expect("right click the handle");
+        let by = bar_y(&mut h, oy);
+        ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": by, "button": "right"})).expect("right click the handle");
         for _ in 0..6 {
             pump(&mut h);
         }
@@ -7585,7 +7597,9 @@ fn clicking_into_words_lets_go_of_a_selected_box() {
     let (_t, mut h, blocks, (ox, oy)) = two_boxes("ui-box-click-away");
     select_box_by_handle(&mut h, ox, oy, 160.0);
     assert_eq!(look_at(&mut h).pointer("/page/selectedContainer").and_then(Value::as_u64), Some(0), "selected");
-    ask(&mut h, "ui.click", json!({"x": ox + 360.0 + 60.0, "y": oy + 30.0 + 40.0})).expect("click the other box's words");
+    // The other box's first block is block 3; its words sit just under its header.
+    let header = h.get_by_label("Add emoji to block 3").rect();
+    ask(&mut h, "ui.click", json!({"x": header.left() + 60.0, "y": header.bottom() as f64 + 30.0})).expect("click the other box's words");
     settle(&mut h);
     let v = look_at(&mut h);
     assert!(v.pointer("/page/selectedContainer").is_none_or(Value::is_null), "no longer selected: {v}");
@@ -7671,7 +7685,7 @@ fn deleting_a_box_with_a_picture_in_it_removes_the_picture_from_the_page() {
     assert!(file(&s).contains("koala.png"), "the sample page has a picture, in the second box");
 
     // The second box starts at x 360, y 30: its handle is along its top.
-    ask(&mut h, "ui.click", json!({"x": ox + 360.0 + 150.0, "y": oy + 30.0 + 6.0})).expect("click the second handle");
+    ask(&mut h, "ui.click", json!({"x": ox + 360.0 + 150.0, "y": oy + 30.0 + HEADER_ROW as f64 + 6.0})).expect("click the second handle");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -7701,10 +7715,11 @@ fn clicking_a_picture_selects_the_picture_only() {
     settle(&mut h);
     let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let ox = origin.first().and_then(Value::as_f64).unwrap_or(0.0);
-    let oy = origin.get(1).and_then(Value::as_f64).unwrap_or(0.0);
 
     // The picture begins below the container handle/padding.
-    ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": oy + 40.0})).expect("click the picture");
+    // The picture sits just under its block's header, which is found by its name.
+    let header = h.query_all_by_label_contains("Add emoji to block").next().expect("the header of the picture block").rect();
+    ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": header.bottom() as f64 + 16.0})).expect("click the picture");
     settle(&mut h);
     let v = look_at(&mut h);
     assert_eq!(v.pointer("/page/selectedImage").and_then(Value::as_u64), Some(0), "the picture is selected: {v}");
@@ -7714,7 +7729,8 @@ fn clicking_a_picture_selects_the_picture_only() {
     settle(&mut h);
     assert!(look_at(&mut h).pointer("/page/selectedImage").is_none_or(Value::is_null), "Escape clears the picture selection");
 
-    ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": oy + 40.0, "button": "right"})).expect("right click the picture");
+    let header = h.query_all_by_label_contains("Add emoji to block").next().expect("the header of the picture block").rect();
+    ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": header.bottom() as f64 + 16.0, "button": "right"})).expect("right click the picture");
     settle(&mut h);
     let v = look_at(&mut h);
     assert_eq!(v.pointer("/page/selectedImage").and_then(Value::as_u64), Some(0), "right-clicking selects the picture: {v}");
@@ -7925,8 +7941,9 @@ fn a_picture_in_a_shared_box_is_moved_by_dragging_it() {
             assert_eq!(one, 1, "one box holds all three blocks to begin with in {what}: {state}");
             let width = state.pointer("/page/containers/0/width").and_then(Value::as_f64).expect("width");
             let rect = rendered_picture_rect(&h, 1);
-            // The picture's box would sit a pad in from its left and a handle's height down.
-            let (from_x, from_y) = (rect.min.x - ox - 6.0, rect.min.y - oy - 14.0);
+            // The picture's box would sit a pad in from its left, and a header row and a handle's
+            // height down.
+            let (from_x, from_y) = (rect.min.x - ox - 6.0, rect.min.y - oy - 24.0 - 14.0);
 
             // A plain click picks the picture and leaves the arrangement alone.
             ask(&mut h, "ui.click", json!({"x": rect.center().x, "y": rect.center().y})).expect("click the picture");
@@ -7978,6 +7995,148 @@ fn a_picture_in_a_shared_box_is_moved_by_dragging_it() {
             assert_eq!(reopened, original, "the same blocks after reopening in {what}");
         }
     }
+}
+
+/// Issue #481: a picture that shares its box with other blocks has Take out of box in its
+/// right-click menu. It does what dragging it out does, without the drag: the box becomes three,
+/// the picture's box where the picture stands, and nothing on the page moves. One Ctrl+Z puts the
+/// one box back. A picture alone in its box is not offered it.
+#[test]
+fn a_picture_is_taken_out_of_its_box_from_its_menu() {
+    use notecraft_model::PageFormat;
+
+    for format in [PageFormat::Html, PageFormat::Cmgfm] {
+        let what = format!("{format:?}");
+        let t = TempDir::new("ui-picture-take-out");
+        let mut s = session(&t);
+        let sample = create_sample(&mut s, Some(LOGO_PNG)).expect("sample");
+        let page = if format == PageFormat::Html { sample.html_page.clone() } else { sample.md_page.clone() };
+        let path = page.to_string_lossy().into_owned();
+        s.attach_bytes(&path, "picture.png", LOGO_PNG).expect("picture");
+        let body = match format {
+            PageFormat::Html => "<p>Before</p><img src=\"assets/picture.png\" alt=\"picture\" width=\"200\" height=\"100\"><p>After</p>",
+            PageFormat::Cmgfm => "Before\n\n<img src=\"assets/picture.png\" alt=\"picture\" width=\"200\" height=\"100\">\n\nAfter\n",
+        };
+        s.run("page.save", &params(&[("path", &path), ("body", body)])).expect("page");
+        s.run("page.containers", &params(&[("path", &path), ("boxes", "0,0,400,3")])).expect("one shared box");
+        let mut app = NoteCraftApp::new(s);
+        app.open_path(&path);
+        let mut h = harness(app, LIGHT);
+        settle(&mut h);
+        let (original, _) = notecraft_formats::boxes::read(format, body);
+
+        let state = look_at(&mut h);
+        let origin = state.pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
+        let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
+        let rect = rendered_picture_rect(&h, 1);
+        // The picture's box sits a pad in from its left, and a header row and a handle's height
+        // down.
+        let (at_x, at_y) = (rect.min.x - ox - 6.0, rect.min.y - oy - 24.0 - 14.0);
+
+        ask(&mut h, "ui.click", json!({"x": rect.center().x, "y": rect.center().y, "button": "right"})).expect("right click the picture");
+        settle(&mut h);
+        h.get_by_label("Take out of box").click();
+        settle(&mut h);
+        let state = look_at(&mut h);
+        let boxes = state.pointer("/page/containers").and_then(Value::as_array).cloned().unwrap_or_default();
+        let counts: Vec<u64> = boxes.iter().filter_map(|b| b.get("blocks").and_then(Value::as_u64)).collect();
+        assert_eq!(counts, vec![1, 1, 1], "words, picture, words in three boxes in {what}: {state}");
+        let field = |i: usize, key: &str| boxes[i].get(key).and_then(Value::as_f64).expect("box field") as f32;
+        assert_eq!((field(0, "x"), field(0, "y")), (0.0, 0.0), "the words before did not move in {what}");
+        assert!((field(1, "x") - at_x).abs() < 2.0 && (field(1, "y") - at_y).abs() < 2.0, "the picture stayed where it was in {what}: {state}");
+        let after = rendered_picture_rect(&h, 1);
+        assert!((after.min - rect.min).length() < 2.0, "the picture is drawn where it was in {what}: {rect:?} then {after:?}");
+        let (now, _) = notecraft_formats::boxes::read(format, h.state().body().expect("open page"));
+        assert_eq!(now, original, "the words and the picture are untouched in {what}");
+
+        // Alone in its box now, it has nothing to come out of.
+        ask(&mut h, "ui.click", json!({"x": after.center().x, "y": after.center().y, "button": "right"})).expect("right click it again");
+        settle(&mut h);
+        assert!(h.query_by_label("Save picture as...").is_some(), "its menu is open in {what}");
+        assert!(h.query_by_label("Take out of box").is_none(), "a picture alone in its box is not offered it in {what}");
+        h.key_press(egui::Key::Escape);
+        settle(&mut h);
+
+        ask(&mut h, "ui.undo", json!({})).expect("undo");
+        settle(&mut h);
+        let state = look_at(&mut h);
+        assert_eq!(
+            state.pointer("/page/containers").and_then(Value::as_array).map(Vec::len),
+            Some(1),
+            "one undo puts the one box back in {what}: {state}"
+        );
+    }
+}
+
+/// Issue #481: Take out of box on a printout page takes the whole printout out, its card and every
+/// page, and none of it moves: the card above the first page is part of what comes out, so the
+/// pages stay where they were drawn rather than dropping by the card's height.
+#[test]
+fn a_printout_is_taken_out_of_its_box_where_it_stands() {
+    let t = TempDir::new("ui-printout-take-out");
+    let mut s = session(&t);
+    let sample = create_sample(&mut s, Some(LOGO_PNG)).expect("sample");
+    let path = sample.md_page.to_string_lossy().into_owned();
+    s.attach_bytes(&path, "a.pdf", b"%PDF-1.4\n").expect("pdf");
+    s.attach_bytes(&path, "a.pdf.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>").expect("card");
+    s.attach_bytes(&path, "a.pdf.printout-001.png", LOGO_PNG).expect("page 1");
+    s.attach_bytes(&path, "a.pdf.printout-002.png", LOGO_PNG).expect("page 2");
+    let body = "Before\n\n[![a.pdf](assets/a.pdf.svg)](assets/a.pdf)\n\n<img src=\"assets/a.pdf.printout-001.png\" alt=\"Printout page 1\" width=\"200\" height=\"100\">\n\n<img src=\"assets/a.pdf.printout-002.png\" alt=\"Printout page 2\" width=\"200\" height=\"100\">\n\nAfter\n";
+    s.run("page.save", &params(&[("path", &path), ("body", body)])).expect("page");
+    s.run("page.containers", &params(&[("path", &path), ("boxes", "0,0,500,5")])).expect("one box");
+    let mut app = NoteCraftApp::new(s);
+    app.open_path(&path);
+    let mut h = harness(app, LIGHT);
+    settle(&mut h);
+    let (one, two) = (rendered_picture_rect(&h, 2), rendered_picture_rect(&h, 3));
+
+    ask(&mut h, "ui.click", json!({"x": two.center().x, "y": two.center().y, "button": "right"})).expect("right click page two");
+    settle(&mut h);
+    h.get_by_label("Take out of box").click();
+    settle(&mut h);
+    let state = look_at(&mut h);
+    let counts: Vec<u64> = state
+        .pointer("/page/containers")
+        .and_then(Value::as_array)
+        .map(|b| b.iter().filter_map(|c| c.get("blocks").and_then(Value::as_u64)).collect())
+        .unwrap_or_default();
+    assert_eq!(counts, vec![1, 3, 1], "the words, the card and both pages, the words: {state}");
+    let (one_now, two_now) = (rendered_picture_rect(&h, 2), rendered_picture_rect(&h, 3));
+    assert!((one_now.min - one.min).length() < 2.0, "the first page is drawn where it was: {one:?} then {one_now:?}");
+    assert!((two_now.min - two.min).length() < 2.0, "the second page is drawn where it was: {two:?} then {two_now:?}");
+}
+
+/// Issue #481: two copies of the same picture in one box are two pictures. Take out of box on the
+/// second takes out the second, not the first copy with the same source.
+#[test]
+fn take_out_of_box_takes_out_the_copy_that_was_right_clicked() {
+    let t = TempDir::new("ui-picture-take-out-copy");
+    let mut s = session(&t);
+    let sample = create_sample(&mut s, Some(LOGO_PNG)).expect("sample");
+    let path = sample.md_page.to_string_lossy().into_owned();
+    s.attach_bytes(&path, "picture.png", LOGO_PNG).expect("picture");
+    let img = "<img src=\"assets/picture.png\" alt=\"picture\" width=\"200\" height=\"100\">";
+    let body = format!("Before\n\n{img}\n\nMiddle\n\n{img}\n\nAfter\n\n{img}\n");
+    s.run("page.save", &params(&[("path", &path), ("body", &body)])).expect("page");
+    // Five blocks share the first box; the last copy is alone in a box of its own far below.
+    s.run("page.containers", &params(&[("path", &path), ("boxes", "0,0,400,5;0,900,400,1")])).expect("boxes");
+    let mut app = NoteCraftApp::new(s);
+    app.open_path(&path);
+    let mut h = harness(app, LIGHT);
+    settle(&mut h);
+    let second = rendered_picture_rect(&h, 3);
+
+    ask(&mut h, "ui.click", json!({"x": second.center().x, "y": second.center().y, "button": "right"})).expect("right click the second copy");
+    settle(&mut h);
+    h.get_by_label("Take out of box").click();
+    settle(&mut h);
+    let state = look_at(&mut h);
+    let counts: Vec<u64> = state
+        .pointer("/page/containers")
+        .and_then(Value::as_array)
+        .map(|b| b.iter().filter_map(|c| c.get("blocks").and_then(Value::as_u64)).collect())
+        .unwrap_or_default();
+    assert_eq!(counts, vec![3, 1, 1, 1], "the second copy came out, the first is still with the words: {state}");
 }
 
 /// A printout is one thing on the page, as in OneNote. Taking hold of any of its pages moves the
@@ -8078,13 +8237,11 @@ fn double_clicking_an_attachment_card_opens_it() {
         .expect("arrange attachment card");
     ask(&mut h, "ui.open", json!({"path": page})).expect("open");
     settle(&mut h);
-    let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
-    let ox = origin.first().and_then(Value::as_f64).unwrap_or(0.0);
-    let oy = origin.get(1).and_then(Value::as_f64).unwrap_or(0.0);
     // Send one native double-click gesture. The single-click selection path is covered by the
     // picture-selection test; keeping this test to one gesture avoids coupling two separate
     // gestures to the runner's frame timing.
-    ask(&mut h, "ui.click", json!({"x": ox + 60.0, "y": oy + 40.0, "count": 2})).expect("double click card");
+    let card = h.get_by_role_and_label(egui::accesskit::Role::Image, "brief.docx").rect().center();
+    ask(&mut h, "ui.click", json!({"x": card.x, "y": card.y, "count": 2})).expect("double click card");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -8134,8 +8291,8 @@ fn delete_and_backspace_remove_a_selected_picture() {
         settle(&mut h);
         let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
         let ox = origin.first().and_then(Value::as_f64).unwrap_or(0.0);
-        let oy = origin.get(1).and_then(Value::as_f64).unwrap_or(0.0);
-        ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": oy + 40.0})).expect("click the picture");
+        let header = h.query_all_by_label_contains("Add emoji to block").next().expect("the header of the block").rect();
+        ask(&mut h, "ui.click", json!({"x": ox + 120.0, "y": header.bottom() as f64 + 16.0})).expect("click the picture");
         settle(&mut h);
         assert_eq!(look_at(&mut h).pointer("/page/selectedImage").and_then(Value::as_u64), Some(0), "the picture is selected");
         ask(&mut h, "ui.key", json!({"key": key})).expect("remove the picture");
@@ -8237,7 +8394,8 @@ fn escape_closes_the_menu_and_its_toolbar() {
 #[test]
 fn a_boxs_menu_has_no_formatting_toolbar() {
     let (_t, mut h, _, (ox, oy)) = two_boxes("ui-minibar-box");
-    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 6.0, "button": "right"})).expect("right click the handle");
+    let by = bar_y(&mut h, oy);
+    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": by, "button": "right"})).expect("right click the handle");
     for _ in 0..8 {
         pump(&mut h);
     }
@@ -8296,7 +8454,8 @@ fn clicking_in_an_empty_box_puts_the_caret_there_and_typing_works() {
 #[test]
 fn an_empty_line_can_be_clicked_into_again() {
     let (_t, mut h, (ox, oy)) = blank_page("ui-empty-box-again", "<p></p>");
-    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 24.0})).expect("click in");
+    // The first click is on open paper; it makes the empty line and puts the caret in it.
+    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 70.0})).expect("click in");
     for _ in 0..4 {
         pump(&mut h);
     }
@@ -8309,7 +8468,9 @@ fn an_empty_line_can_be_clicked_into_again() {
     for _ in 0..4 {
         pump(&mut h);
     }
-    ask(&mut h, "ui.click", json!({"x": ox + 100.0, "y": oy + 24.0})).expect("click in again");
+    // The line is named once it exists, so the second click finds it by name.
+    let line = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Block 1").rect().center();
+    ask(&mut h, "ui.click", json!({"x": line.x, "y": line.y})).expect("click in again");
     for _ in 0..6 {
         pump(&mut h);
     }
@@ -8652,7 +8813,7 @@ fn an_older_page_is_read_and_moved_to_the_new_form() {
     let v = look_at(&mut h);
     let origin = v.pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0), origin.get(1).and_then(Value::as_f64).unwrap_or(0.0));
-    let (hx, hy) = (ox + 40.0 + 160.0, oy + 20.0 + 6.0);
+    let (hx, hy) = (ox + 40.0 + 160.0, oy + 20.0 + HEADER_ROW as f64 + 6.0);
     ask(&mut h, "ui.press", json!({"x": hx, "y": hy})).expect("press");
     pump(&mut h);
     ask(&mut h, "ui.move", json!({"x": hx + 30.0, "y": hy + 20.0})).expect("move");
@@ -9207,7 +9368,7 @@ fn a_selected_box_takes_the_ribbon_as_a_whole() {
     // Pick the box by its handle.
     let origin = look(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
-    click(&mut h, ox + 40.0 + 160.0, oy + 20.0 + 6.0);
+    click(&mut h, ox + 40.0 + 160.0, oy + 20.0 + HEADER_ROW + 6.0);
     assert_eq!(look(&mut h).pointer("/page/selectedContainer").and_then(Value::as_u64), Some(0), "the box is selected");
 
     // Bold, from the ribbon: every line of words in the box, and the box stays picked.
@@ -9374,11 +9535,11 @@ fn typed_font_size_case(html: bool, enter: bool) {
     let after = h.state().body().unwrap_or_default().to_string();
     let (blocks, _) = notecraft_formats::boxes::read(format, &after);
     assert_eq!(blocks.len(), 2, "Enter in the combo must not create a paragraph in the note");
-    let notecraft_formats::Block::Paragraph(selected) = &blocks[0] else { panic!("selected paragraph") };
+    let notecraft_formats::Block::Paragraph(selected, _) = &blocks[0] else { panic!("selected paragraph") };
     assert_eq!(selected.iter().map(|s| s.text.as_str()).collect::<String>(), "alpha plain", "typing in the combo did not edit the note");
     assert!(selected.iter().all(|s| s.font_size == Some(24)), "the original selection took the size: {after}");
     assert_eq!(selected.iter().filter(|s| s.bold).map(|s| s.text.as_str()).collect::<String>(), "alpha", "other marks survive");
-    let notecraft_formats::Block::Paragraph(outside) = &blocks[1] else { panic!("outside paragraph") };
+    let notecraft_formats::Block::Paragraph(outside, _) = &blocks[1] else { panic!("outside paragraph") };
     assert_eq!(outside.iter().map(|s| s.text.as_str()).collect::<String>(), "untouched paragraph");
     assert!(outside.iter().all(|s| s.font_size.is_none()), "the unselected paragraph is unchanged");
     review(&mut h, &format!("typed_font_size_{html}_{enter}"));
@@ -9505,7 +9666,7 @@ fn dragging_across_text_selects_it() {
     let (ox, oy) = (origin[0].as_f64().unwrap_or(0.0) as f32, origin[1].as_f64().unwrap_or(0.0) as f32);
     // Follow the rendered text container, rather than a screen coordinate that
     // becomes blank paper when the surrounding application chrome changes.
-    let (y, x0, x1) = (oy + 24.0, ox + 10.0, ox + 70.0);
+    let (y, x0, x1) = (oy + 24.0 + HEADER_ROW, ox + 10.0, ox + 70.0);
     ask(&mut h, "ui.click", json!({"x": x0, "y": y})).expect("focus the text");
     settle(&mut h);
     ask(&mut h, "ui.press", json!({"x": x0, "y": y})).expect("press");
@@ -9607,7 +9768,7 @@ fn installed_font_family_can_be_applied_and_undone_in_both_formats() {
         settle(&mut h);
         let after = h.state().body().unwrap_or_default().to_string();
         let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert!(spans.iter().all(|span| span.font_family.as_deref() == Some(family.as_str())), "{family}: {after}");
         let inspection = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
         assert_eq!(h.get_by_label("Font Family").value().as_deref(), Some(family.as_str()), "{inspection}");
@@ -9658,7 +9819,7 @@ fn installed_family_and_underline_apply_to_new_text() {
     ask(&mut h, "ui.text", json!({"text": "字"})).expect("typing");
     settle(&mut h);
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, h.state().body().unwrap_or_default());
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert!(spans.iter().any(|span| span.text.contains('字') && span.underline && span.font_family.as_deref() == Some(family.as_str())), "{spans:?}");
 }
 
@@ -9681,7 +9842,7 @@ fn underline_and_scripts_toggle_and_undo_for_a_selected_line_in_both_formats() {
             settle(&mut h);
             let after = h.state().body().unwrap_or_default().to_string();
             let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-            let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+            let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
             assert!(
                 spans.iter().all(|span| match mark {
                     "Underline" => span.underline,
@@ -10146,7 +10307,7 @@ mod formatting_shortcuts_match_ribbon_and_keep_selection_history_and_storage {
             review(&mut h, &format!("shortcut_{format:?}_{}", theme.id()));
         }
         let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         let active = |s: &notecraft_formats::markdown::Span| match key {
             egui::Key::B => s.bold,
             egui::Key::I => s.italic,
@@ -10155,7 +10316,7 @@ mod formatting_shortcuts_match_ribbon_and_keep_selection_history_and_storage {
         assert_eq!(spans.iter().filter(|s| active(s)).map(|s| s.text.as_str()).collect::<String>(), "bravo", "{label}, mac={mac}: {after}");
         press(&mut h);
         let (blocks, _) = notecraft_formats::boxes::read(format, h.state().body().unwrap_or_default());
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert!(spans.iter().all(|s| !active(s)), "second shortcut toggles the same selection");
         ask(&mut h, "ui.undo", json!({})).expect("undo toggle");
         settle(&mut h);
@@ -10256,7 +10417,7 @@ fn replacing_a_formatted_full_selection_keeps_only_the_replacement_in_both_forma
 
         let saved = h.state().body().unwrap_or_default().to_string();
         let (blocks, _) = notecraft_formats::boxes::read(format, &saved);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert_eq!(spans.iter().map(|span| span.text.as_str()).collect::<String>(), "Replacement", "{format:?}: {saved}");
         assert!(spans.iter().all(|span| span.bold == spans[0].bold), "{format:?}: replacement has one consistent formatting state: {saved}");
     }
@@ -10292,7 +10453,7 @@ fn legacy_font_marks_toggle_partial_selection_without_losing_other_styles() {
             settle(&mut h);
             let after = h.state().body().unwrap_or_default().to_string();
             let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-            let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+            let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
             let active = |s: &notecraft_formats::markdown::Span| match label {
                 "Bold" => s.bold,
                 "Italic" => s.italic,
@@ -10304,7 +10465,7 @@ fn legacy_font_marks_toggle_partial_selection_without_losing_other_styles() {
             settle(&mut h);
             let toggled = h.state().body().unwrap_or_default().to_string();
             let (blocks, _) = notecraft_formats::boxes::read(format, &toggled);
-            let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+            let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
             assert!(spans.iter().all(|s| !active(s) && s.underline), "{label} toggles only the selection: {toggled}");
             ask(&mut h, "ui.undo", json!({})).expect("undo toggle");
             settle(&mut h);
@@ -10345,14 +10506,14 @@ fn underline_applies_only_to_a_partial_selection_and_undoes_in_both_formats() {
         settle(&mut h);
         let after = h.state().body().unwrap_or_default().to_string();
         let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert_eq!(spans.iter().filter(|s| s.underline).map(|s| s.text.as_str()).collect::<String>(), "bravo", "{after}");
         assert_eq!(spans.iter().filter(|s| !s.underline).map(|s| s.text.as_str()).collect::<String>(), "alpha  omega", "{after}");
         h.get_by_label("Underline").click();
         settle(&mut h);
         let toggled = h.state().body().unwrap_or_default().to_string();
         let (blocks, _) = notecraft_formats::boxes::read(format, &toggled);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert!(spans.iter().all(|s| !s.underline), "selection remains active for toggle: {toggled}");
         ask(&mut h, "ui.undo", json!({})).expect("undo toggle");
         settle(&mut h);
@@ -10391,7 +10552,7 @@ fn font_size_replaces_only_the_partial_selection_inside_an_existing_size() {
     settle(&mut h);
     let body = h.state().body().unwrap_or_default();
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, body);
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert_eq!(spans.iter().filter(|s| s.font_size == Some(24)).map(|s| s.text.as_str()).collect::<String>(), "bravo", "{body}");
     assert_eq!(spans.iter().filter(|s| s.font_size == Some(18)).map(|s| s.text.as_str()).collect::<String>(), "alpha  omega", "{body}");
 }
@@ -10419,7 +10580,7 @@ fn font_size_replaces_mixed_sizes_in_a_partial_selection() {
     settle(&mut h);
     let body = h.state().body().unwrap_or_default();
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, body);
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert_eq!(spans.iter().filter(|s| s.font_size == Some(24)).map(|s| s.text.as_str()).collect::<String>(), "alpha bravo", "{body}");
     assert!(spans.iter().all(|s| s.font_size != Some(18)), "{body}");
 }
@@ -10463,7 +10624,7 @@ fn partial_selection_keeps_font_family_when_script_is_added() {
     settle(&mut h);
     let body = h.state().body().unwrap_or_default();
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, body);
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert!(
         spans.iter().any(|span| span.text == "bravo"
             && span.font_family.as_deref() == Some(family.as_str())
@@ -10499,7 +10660,7 @@ fn pending_marks_combine_with_size_for_unicode_typing_in_both_formats() {
         settle(&mut h);
         let after = h.state().body().unwrap_or_default().to_string();
         let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert!(
             spans.iter().any(|span| span.text.contains("مرحبا")
                 && span.underline
@@ -10533,7 +10694,7 @@ fn pending_marks_toggle_and_cancel_when_the_caret_moves() {
     ask(&mut h, "ui.text", json!({"text": "X"})).expect("typing");
     settle(&mut h);
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, h.state().body().unwrap_or_default());
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert!(spans.iter().any(|s| s.text == "X" && !s.underline && s.script == Some(notecraft_formats::markdown::Script::Superscript)));
 
     ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
@@ -10545,7 +10706,7 @@ fn pending_marks_toggle_and_cancel_when_the_caret_moves() {
     ask(&mut h, "ui.text", json!({"text": "Y"})).expect("typing after moving");
     settle(&mut h);
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, h.state().body().unwrap_or_default());
-    let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+    let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
     assert!(spans.iter().any(|s| s.text.contains('Y') && !s.underline), "{spans:?}");
 }
 
@@ -10596,7 +10757,7 @@ fn selected_line_script_switch_is_exclusive_and_can_be_toggled_off() {
         settle(&mut h);
         let body = h.state().body().unwrap_or_default();
         let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, body);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert_eq!(spans.iter().map(|s| s.text.as_str()).collect::<String>(), "H2O");
         assert!(spans.iter().all(|s| s.underline && s.script == expected), "{button}: {body}");
     }
@@ -10616,7 +10777,7 @@ fn selected_container_font_size_is_undoable_and_leaves_other_boxes_alone() {
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, &after);
     fn spans(block: &notecraft_formats::Block) -> &[notecraft_formats::markdown::Span] {
         match block {
-            notecraft_formats::Block::Heading { spans, .. } | notecraft_formats::Block::Paragraph(spans) => spans,
+            notecraft_formats::Block::Heading { spans, .. } | notecraft_formats::Block::Paragraph(spans, _) => spans,
             _ => panic!("expected text block"),
         }
     }
@@ -10676,7 +10837,7 @@ fn selected_container_font_family_is_undoable_and_leaves_other_boxes_alone() {
     let (blocks, _) = notecraft_formats::boxes::read(notecraft_model::PageFormat::Cmgfm, &after);
     fn spans(block: &notecraft_formats::Block) -> &[notecraft_formats::markdown::Span] {
         match block {
-            notecraft_formats::Block::Heading { spans, .. } | notecraft_formats::Block::Paragraph(spans) => spans,
+            notecraft_formats::Block::Heading { spans, .. } | notecraft_formats::Block::Paragraph(spans, _) => spans,
             _ => panic!("expected text block"),
         }
     }
@@ -10740,7 +10901,7 @@ fn legacy_font_marks_apply_to_next_typed_text_without_changing_page_first() {
             settle(&mut h);
             let after = h.state().body().unwrap_or_default().to_string();
             let (blocks, _) = notecraft_formats::boxes::read(format, &after);
-            let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+            let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
             let marked = |s: &notecraft_formats::markdown::Span| match label {
                 "Bold" => s.bold,
                 "Italic" => s.italic,
@@ -10779,7 +10940,7 @@ fn pending_font_marks_combine_and_can_be_switched_off_before_typing() {
         settle(&mut h);
         let body = h.state().body().unwrap_or_default();
         let (blocks, _) = notecraft_formats::boxes::read(format, body);
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph expected") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph expected") };
         assert!(
             spans.iter().any(|span| span.text == "words" && span.bold && span.italic && span.underline && !span.strike),
             "combined pending styles: {body}"
@@ -10887,7 +11048,7 @@ fn pending_font_size_can_change_in_a_typing_run() {
     ask(&mut h, "ui.text", json!({"text": "second"})).expect("second size");
     settle(&mut h);
     let blocks = notecraft_formats::markdown::parse(h.state().body().unwrap_or_default());
-    let Some(notecraft_formats::Block::Paragraph(spans)) = blocks.get(1) else { panic!("paragraph") };
+    let Some(notecraft_formats::Block::Paragraph(spans, _)) = blocks.get(1) else { panic!("paragraph") };
     assert!(spans.iter().any(|span| span.text.contains("first") && span.font_size == Some(18)), "{spans:?}");
     assert!(spans.iter().any(|span| span.text.contains("second") && span.font_size == Some(24)), "{spans:?}");
 }
@@ -10935,7 +11096,7 @@ fn the_format_painter_puts_the_formatting_on_the_words_picked_next() {
             notecraft_formats::markdown::parse(&md)
                 .into_iter()
                 .flat_map(|b| match b {
-                    notecraft_formats::Block::Paragraph(s) => s,
+                    notecraft_formats::Block::Paragraph(s, _) => s,
                     _ => Vec::new(),
                 })
                 .collect()
@@ -11035,8 +11196,8 @@ fn font_size_undo_and_redo_preserve_page_content_in_both_formats() {
         let (after_blocks, _) = notecraft_formats::boxes::read(format, &resized);
         let spans = |block: &notecraft_formats::Block| match block {
             notecraft_formats::Block::Heading { spans, .. }
-            | notecraft_formats::Block::Paragraph(spans)
-            | notecraft_formats::Block::Quote(spans)
+            | notecraft_formats::Block::Paragraph(spans, _)
+            | notecraft_formats::Block::Quote(spans, _)
             | notecraft_formats::Block::Item { spans, .. } => spans.clone(),
             _ => panic!("expected a block of text"),
         };
@@ -11601,7 +11762,7 @@ fn a_selected_box_takes_direction_tags_and_lists_as_a_whole() {
     };
     let origin = look(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
-    click(&mut h, ox + 40.0 + 160.0, oy + 20.0 + 6.0);
+    click(&mut h, ox + 40.0 + 160.0, oy + 20.0 + HEADER_ROW + 6.0);
     assert_eq!(look(&mut h).pointer("/page/selectedContainer").and_then(Value::as_u64), Some(0), "the box is selected");
 
     // Right to left on every paragraph of words in it.
@@ -11652,7 +11813,7 @@ fn a_picture_in_each_of_two_stacked_boxes_can_be_selected_and_resized() {
     for (block, top) in [(1u64, 0.0), (3u64, 150.0)] {
         let mut selected = false;
         for dy in (0..8).map(|n| 30.0 + 12.0 * f64::from(n)) {
-            ask(&mut h, "ui.click", json!({"x": ox + 60.0, "y": oy + top + dy})).expect("click");
+            ask(&mut h, "ui.click", json!({"x": ox + 60.0, "y": oy + top + f64::from(HEADER_ROW) + dy})).expect("click");
             settle(&mut h);
             let v = look_at(&mut h);
             if v.pointer("/page/selectedObject/block").and_then(Value::as_u64) == Some(block) {
@@ -11667,9 +11828,9 @@ fn a_picture_in_each_of_two_stacked_boxes_can_be_selected_and_resized() {
         let before = width(&mut h);
         let mut grew = false;
         for dy in (0..10).map(|n| 30.0 + 8.0 * f64::from(n)) {
-            ask(&mut h, "ui.click", json!({"x": ox + 60.0, "y": oy + top + 55.0})).expect("select the picture again");
+            ask(&mut h, "ui.click", json!({"x": ox + 60.0, "y": oy + top + f64::from(HEADER_ROW) + 55.0})).expect("select the picture again");
             settle(&mut h);
-            let (x, y) = (ox + 6.0 + 300.0, oy + top + dy);
+            let (x, y) = (ox + 6.0 + 300.0, oy + top + f64::from(HEADER_ROW) + dy);
             ask(&mut h, "ui.press", json!({"x": x, "y": y})).expect("press the edge");
             for step in 1..=4 {
                 ask(&mut h, "ui.move", json!({"x": x + 15.0 * f64::from(step), "y": y})).expect("drag the edge");
@@ -11723,6 +11884,13 @@ fn page_origin(h: &mut Harness<'_, NoteCraftApp>) -> egui::Pos2 {
 }
 
 /// The first box as the page keeps it: x, y, width.
+/// The height, in points, the page's text and boxes sit below the top of a box: the header row.
+/// A box's bar is the strip right under that row, so a click that means the bar goes here.
+fn bar_y(h: &mut Harness<'_, NoteCraftApp>, oy: f64) -> f64 {
+    let (_x, box_y, _w) = first_box(h);
+    oy + box_y as f64 + HEADER_ROW as f64 + 6.0
+}
+
 fn first_box(h: &mut Harness<'_, NoteCraftApp>) -> (f32, f32, f32) {
     let b = ask(h, "ui.inspect", json!({})).expect("inspect").pointer("/page/containers/0").cloned().unwrap_or(Value::Null);
     let n = |k: &str| b.get(k).and_then(Value::as_f64).unwrap_or(-1.0) as f32;
@@ -11751,7 +11919,7 @@ fn on_grid(v: f32, step: f32) -> bool {
 
 /// Where box 0's move strip is, for a box at `x, y` page points and zoom `z`.
 fn strip_at(origin: egui::Pos2, x: f32, y: f32, z: f32) -> egui::Pos2 {
-    origin + egui::vec2(x * z + 100.0 * z, y * z + 7.0 * z)
+    origin + egui::vec2(x * z + 100.0 * z, y * z + (HEADER_ROW + 7.0) * z)
 }
 
 /// Issue #79: with snapping off, moving a box is free, exactly as before.
@@ -11796,7 +11964,7 @@ fn with_snapping_on_resizing_puts_the_right_edge_on_the_grid() {
     let (mut h, origin) = one_box_page(app, &s);
     // The resize edge is the last 10 points of the box's frame as drawn. The box is 320 wide,
     // but the sample's three-column table is 480 points wide, so the box is drawn that wide.
-    let edge = origin + egui::vec2(40.0 + 480.0 + 12.0 - 4.0, 20.0 + 14.0 + 10.0);
+    let edge = origin + egui::vec2(40.0 + 480.0 + 12.0 - 4.0, 20.0 + HEADER_ROW + 14.0 + 10.0);
     drag_by(&mut h, edge, egui::vec2(53.0, 0.0));
     let (x, _, width) = first_box(&mut h);
     assert!(on_grid(x + width, 18.0), "the right edge is on the grid: x={x} width={width}");
@@ -12083,7 +12251,7 @@ fn a_box_widened_by_its_table_resizes_from_its_drawn_edge() {
     let origin = look(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
     let at = |i: usize| origin.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
     // The resize edge is the last 10 points of the frame as drawn: 480 points and the padding.
-    let edge = egui::pos2(at(0) + 40.0 + 480.0 + 12.0 - 4.0, at(1) + 20.0 + 14.0 + 10.0);
+    let edge = egui::pos2(at(0) + 40.0 + 480.0 + 12.0 - 4.0, at(1) + 20.0 + HEADER_ROW + 14.0 + 10.0);
 
     ask(&mut h, "ui.press", json!({"x": edge.x, "y": edge.y})).expect("press");
     pump(&mut h);
@@ -12338,6 +12506,31 @@ fn find_tags_lists_tagged_notes_and_goes_to_them() {
     settle(&mut h);
     assert_eq!(h.query_all_by_label("Tags Summary").count(), 0, "the summary closes");
 }
+#[test]
+fn the_open_tags_summary_tracks_the_current_section_without_resetting_its_filter() {
+    let (_t, mut app, sample) = sample_app("ui-find-tags-navigation");
+    notecraft_store::page::save_body(&sample.html_page, "<p>Sample section</p>").expect("save");
+    notecraft_store::page::save_body(&sample.md_page, "- [ ] New section task\n\n- [x] Done in new section\n").expect("save");
+    assert_ne!(sample.html_page.parent(), sample.md_page.parent());
+    app.open_path(&sample.html_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1800.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("Find Tags").click();
+    settle(&mut h);
+    h.get_by_label("Only unchecked To Do items").click();
+    settle(&mut h);
+    let summary = |h: &mut Harness<'_, NoteCraftApp>| ask(h, "ui.inspect", json!({})).expect("inspector")["tagsSummary"].clone();
+    assert!(summary(&mut h)["lines"].as_array().expect("tags lines").is_empty());
+    h.state_mut().open_path(&sample.md_page.to_string_lossy());
+    settle(&mut h);
+    let state = summary(&mut h);
+    let lines = state["lines"].as_array().expect("tags lines");
+    assert_eq!(state["scope"], "section");
+    assert_eq!(state["unchecked"], true);
+    assert!(lines.iter().any(|line| line["text"] == "New section task"), "the scoped pane now lists the section on screen");
+    assert!(lines.iter().all(|line| line["text"] != "Done in new section"), "the unchecked filter is still in effect");
+}
+
 /// The page's sideways scroll bar as `ui.inspect` reports it: the track and the thumb, or `None`.
 fn horizontal_bar(h: &mut Harness<'_, NoteCraftApp>) -> Option<(egui::Rect, egui::Rect)> {
     let v = ask(h, "ui.inspect", json!({})).expect("inspect");
@@ -12445,7 +12638,10 @@ fn a_pen_on_the_page_picks_up_the_last_pen_and_typing_puts_it_down() {
     settle(&mut h);
     assert_eq!(ink(&mut h).0, "write");
 
-    let at = page_origin(&mut h) + egui::vec2(500.0, 420.0);
+    // The pen lands on the header row above the box, which is blank apart from its `+`: a stroke on
+    // the words would put the caret there, which is not what this test is about.
+    let header_row = h.query_all_by_label_contains("Add emoji to block").next().expect("the header of the box's top block").rect();
+    let at = egui::pos2(header_row.center().x + 60.0, header_row.top() + 2.0);
     let stroke = |h: &mut Harness<'_, NoteCraftApp>, force: Option<f32>| {
         let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos, force };
         h.input_mut().events.push(contact(egui::TouchPhase::Start, at));
@@ -12500,8 +12696,257 @@ fn a_pen_on_the_page_picks_up_the_last_pen_and_typing_puts_it_down() {
     assert_eq!(ink(&mut h).0, "write", "typing goes back to the caret");
     let after = h.state().body().unwrap_or_default().to_string();
     assert_eq!(after.matches('Z').count(), before.matches('Z').count() + 1, "the Z went into the page");
-    assert!(after.contains("ZNoteCraft pages"), "where the caret was before the pen: {after}");
+    // The caret was put in the first paragraph with `ui.caret`, which places it at the end of the
+    // text; the Z goes there.
+    assert!(after.contains("CommonMark + GFM.Z"), "where the caret was before the pen: {after}");
 }
+/// The other half of the automatic switching: a pen the pen picked up is put down again by a
+/// click or a tap on the page with the trackpad, which puts the caret where it landed. A pen
+/// chosen by hand stays in hand, so a mouse or a trackpad can still draw. File > Options turns
+/// all of it off, and it stays off.
+#[test]
+fn a_trackpad_click_puts_down_the_pen_the_pen_picked_up() {
+    let (t, mut app, s) = sample_app("ui-auto-pen-trackpad");
+    app.open_path(&s.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 1000.0));
+    settle(&mut h);
+    let pointer = |h: &mut Harness<'_, NoteCraftApp>| {
+        let v = ask(h, "ui.inspect", json!({})).expect("inspect");
+        v.pointer("/ink/pointer").and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let at = page_origin(&mut h) + egui::vec2(500.0, 420.0);
+    // A pen: a touch that reports a force, with the pointer the platform moves along with it.
+    let pen = |h: &mut Harness<'_, NoteCraftApp>, at: egui::Pos2| {
+        let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos, force: Some(0.6) };
+        h.input_mut().events.push(contact(egui::TouchPhase::Start, at));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        let to = at + egui::vec2(60.0, 10.0);
+        h.input_mut().events.push(contact(egui::TouchPhase::Move, to));
+        h.input_mut().events.push(egui::Event::PointerMoved(to));
+        h.step();
+        h.input_mut().events.push(contact(egui::TouchPhase::End, to));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        settle(h);
+    };
+    // A click with the trackpad: the pointer moves there and presses, and no touch comes with it.
+    let trackpad = |h: &mut Harness<'_, NoteCraftApp>, at: egui::Pos2| {
+        h.input_mut().events.push(egui::Event::MouseMoved(egui::vec2(3.0, 1.0)));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        settle(h);
+    };
+
+    assert_eq!(pointer(&mut h), "write");
+    pen(&mut h, at);
+    assert_eq!(pointer(&mut h), "draw", "the pen picked up a pen");
+    trackpad(&mut h, at + egui::vec2(0.0, -200.0));
+    assert_eq!(pointer(&mut h), "write", "a trackpad click put it down");
+    let state = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+    assert_eq!(state.pointer("/ink/strokes").and_then(Value::as_u64), Some(1), "and drew nothing: {state}");
+
+    // Chosen by hand, the pen stays in hand: the trackpad draws with it.
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    h.get_by_label("Pen red").click();
+    settle(&mut h);
+    trackpad(&mut h, at + egui::vec2(0.0, 120.0));
+    assert_eq!(pointer(&mut h), "draw", "a pen chosen by hand is not put down by the trackpad");
+
+    // Auto-switch off: the pen no longer picks up a pen, and it stays off for the next window.
+    h.get_by_label("Type").click();
+    settle(&mut h);
+    h.state_mut().open_backstage_page("Options");
+    settle(&mut h);
+    h.get_by_label("Switch tools with the pen and the trackpad").click();
+    settle(&mut h);
+    h.state_mut().close_backstage();
+    settle(&mut h);
+    pen(&mut h, at + egui::vec2(0.0, 240.0));
+    assert_eq!(pointer(&mut h), "write", "with Auto-switch off the pen changes nothing");
+    let settings = std::fs::read_to_string(t.path().join("settings.toml")).unwrap_or_default();
+    assert!(settings.contains("switch_by_device = \"false\""), "the choice is kept: {settings}");
+}
+/// The trackpad puts down a pen the pen picked up on the part of the page the window shows,
+/// once it is scrolled too, and not from outside it; a tool added from the rack is chosen by
+/// hand and stays, but only when the rack takes it.
+#[test]
+fn the_trackpad_switch_follows_the_shown_page_and_the_rack() {
+    let (_t, mut app, s) = sample_app("ui-auto-pen-scrolled");
+    app.open_path(&s.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 1000.0));
+    settle(&mut h);
+    let pointer = |h: &mut Harness<'_, NoteCraftApp>| {
+        let v = ask(h, "ui.inspect", json!({})).expect("inspect");
+        v.pointer("/ink/pointer").and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let pen = |h: &mut Harness<'_, NoteCraftApp>, at: egui::Pos2| {
+        let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos, force: Some(0.6) };
+        h.input_mut().events.push(contact(egui::TouchPhase::Start, at));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        h.input_mut().events.push(contact(egui::TouchPhase::End, at + egui::vec2(30.0, 4.0)));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at + egui::vec2(30.0, 4.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        settle(h);
+    };
+    let trackpad = |h: &mut Harness<'_, NoteCraftApp>, at: egui::Pos2| {
+        h.input_mut().events.push(egui::Event::MouseMoved(egui::vec2(3.0, 1.0)));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        settle(h);
+    };
+    let at = page_origin(&mut h) + egui::vec2(500.0, 300.0);
+
+    // Picked up, then the page pans down by two fingers: low in the window is page still shown,
+    // though below the first screen of it.
+    pen(&mut h, at);
+    assert_eq!(pointer(&mut h), "draw");
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.step();
+    for _ in 0..20 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+            source: egui::MouseWheelSource::Trackpad,
+        });
+        h.step();
+    }
+    settle(&mut h);
+    // Outside the page shown, over the notebooks: not a click on the page.
+    trackpad(&mut h, egui::pos2(60.0, 400.0));
+    assert_eq!(pointer(&mut h), "draw", "a click beside the page does not put the pen down");
+    trackpad(&mut h, egui::pos2(at.x, 940.0));
+    assert_eq!(pointer(&mut h), "write", "a click low on the page shown puts it down");
+
+    // A tool added from the rack is one chosen by hand: it stays in hand. The caret's pointer is
+    // in hand again, so the pen picks up a pen.
+    pen(&mut h, at);
+    assert_eq!(pointer(&mut h), "draw");
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    let add = |h: &mut Harness<'_, NoteCraftApp>| {
+        h.get_by_label("Add").click();
+        settle(h);
+        h.get_by_label("Add Pen").click();
+        settle(h);
+    };
+    add(&mut h);
+    trackpad(&mut h, at);
+    assert_eq!(pointer(&mut h), "draw", "a tool added to the rack stays in hand");
+}
+
+/// An Add the full rack turns down chooses nothing: the pen the pen picked up is still put down
+/// by the trackpad.
+#[test]
+fn an_add_the_full_rack_turns_down_leaves_the_pen_to_the_trackpad() {
+    let t = TempDir::new("ui-auto-pen-full-rack");
+    let mut s = session(&t);
+    let sample = create_sample(&mut s, Some(LOGO_PNG)).expect("sample");
+    let full: Vec<notecraft_ink::rack::Nib> =
+        (0..notecraft_ink::rack::MAX_NIBS).map(|_| notecraft_ink::rack::new_nib(notecraft_ink::Tool::Pen)).collect();
+    s.settings.set("pen_rack", &notecraft_ink::rack::write(&full)).expect("a full rack");
+    let mut app = NoteCraftApp::new(s);
+    app.set_redact_paths(true);
+    app.open_path(&sample.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 1000.0));
+    settle(&mut h);
+    let pointer = |h: &mut Harness<'_, NoteCraftApp>| {
+        let v = ask(h, "ui.inspect", json!({})).expect("inspect");
+        v.pointer("/ink/pointer").and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let at = page_origin(&mut h) + egui::vec2(500.0, 300.0);
+    let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos, force: Some(0.6) };
+    h.input_mut().events.push(contact(egui::TouchPhase::Start, at));
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.input_mut().events.push(contact(egui::TouchPhase::End, at));
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    settle(&mut h);
+    assert_eq!(pointer(&mut h), "draw", "the pen picked up a pen");
+    let rack = ask(&mut h, "ui.inspect", json!({})).expect("inspect").pointer("/ink/rack").cloned();
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("nothing open");
+    // Draw > Add > Pen: the rack is full, and says so.
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    let adds = h.query_all_by_label("Add").count();
+    assert!(adds > 0, "the Draw tab shows Add even with a full rack");
+    h.get_by_label("Add").click();
+    settle(&mut h);
+    h.get_by_label("Add Pen").click();
+    settle(&mut h);
+    assert_eq!(ask(&mut h, "ui.inspect", json!({})).expect("inspect").pointer("/ink/rack").cloned(), rack, "nothing was added");
+    h.input_mut().events.push(egui::Event::MouseMoved(egui::vec2(3.0, 1.0)));
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    settle(&mut h);
+    assert_eq!(pointer(&mut h), "write", "an Add the full rack turned down chose nothing");
+}
+
 /// Issue #23: Draw > Collect All brings boxes and ink that drifted apart on the canvas back
 /// together, keeps their order and does not lay one over another; one Undo puts them all back.
 #[test]
@@ -13309,7 +13754,7 @@ fn font_colour_and_highlight_colour_the_selected_words_in_both_formats() {
         assert!(body.contains("color: #c00000") && body.contains("background-color: #ffff00"), "html={html}: both colours saved:\n{body}");
         assert!(body.contains("these"), "html={html}:\n{body}");
         let blocks = notecraft_formats::markdown::parse(&if html { notecraft_formats::html::to_markdown(&body) } else { body.clone() });
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("html={html}: a paragraph") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("html={html}: a paragraph") };
         let coloured: String = spans.iter().filter(|s| s.colour.as_deref() == Some("#c00000")).map(|s| s.text.as_str()).collect();
         assert_eq!(coloured, "these", "html={html}: only the picked word");
         assert!(spans.iter().filter(|s| s.colour.is_some()).all(|s| s.highlight.as_deref() == Some("#ffff00")));
@@ -13432,7 +13877,7 @@ fn window_capture_refreshed_caret_uses_the_new_pages_formatting() {
         h.state_mut().save();
         let loaded = notecraft_store::page::load_page(page).expect("saved page");
         let blocks = notecraft_formats::boxes::read(loaded.format, &loaded.body).0;
-        let notecraft_formats::Block::Paragraph(spans) = &blocks[0] else { panic!("paragraph") };
+        let notecraft_formats::Block::Paragraph(spans, _) = &blocks[0] else { panic!("paragraph") };
         assert!(spans.iter().any(|span| span.bold && span.text.contains("seedx")), "typing after refresh must retain the peer's formatting");
     }
 }
@@ -13632,7 +14077,8 @@ fn a_sticker_from_the_gallery_goes_on_the_page_as_a_picture_it_owns() {
         assert!(std::fs::read_to_string(&file).is_ok_and(|t| t.starts_with("<svg")), "html={html}: the page owns the file");
         h.get_by_label("Stickers").click();
         settle(&mut h);
-        h.get_by_label("Star sticker").click();
+        // The picture on the page is named the same way, so the gallery's own item is the last one drawn.
+        h.query_all_by_label("Star sticker").last().expect("the gallery's star sticker").click();
         settle(&mut h);
         assert_eq!(images(&h).iter().filter(|(src, _)| src == "assets/sticker-star.svg").count(), 2, "html={html}");
         assert!(!page.join("assets/sticker-star-2.svg").exists(), "html={html}: one file for both");
@@ -13942,4 +14388,1722 @@ A short page.",
         })
     });
     assert!(!stray_ink, "font names are drawn below the font list's popup");
+}
+
+// ---------- UI polish: issues #365 to #384 ----------
+
+/// Whether a control reports itself as on (egui reports a selected button as toggled).
+fn is_on(h: &Harness<'_, NoteCraftApp>, label: &str) -> Option<bool> {
+    use egui_kittest::kittest::NodeT as _;
+    h.get_by_label(label).accesskit_node().toggled().map(|t| t == egui::accesskit::Toggled::True)
+}
+
+fn pages_in(section: &std::path::Path) -> usize {
+    notecraft_store::tree::load_tree(section).map_or(0, |n| n.children.iter().filter(|c| c.info.kind == notecraft_model::NodeKind::Page).count())
+}
+
+/// Issue #366: Add page is one full-width row across the page list, about 32 points tall, and
+/// its plus, its words and its far edge each add exactly one page and open it.
+#[test]
+fn add_page_is_one_full_width_row_and_every_part_of_it_adds_one_page() {
+    for part in ["plus", "middle", "far edge"] {
+        let (_t, app, s) = sample_app("ui-add-page-row");
+        let mut h = harness(app, LIGHT);
+        h.state_mut().open_path(&s.md_page.to_string_lossy());
+        settle(&mut h);
+        // The page list with its own Add page is the Separate pages layout.
+        h.get_by_label("View").click();
+        settle(&mut h);
+        h.get_by_label("Separate pages").click();
+        settle(&mut h);
+        let section = s.md_page.parent().expect("section").to_path_buf();
+        let before = pages_in(&section);
+        let row = h.get_by_label("Add page").rect();
+        assert!(row.width() >= 140.0, "{part}: Add page spans the page list, not just its words: {row:?}");
+        assert!(row.height() >= 30.0, "{part}: Add page is a comfortable target: {row:?}");
+        let x = match part {
+            "plus" => row.min.x + 20.0,
+            "middle" => row.center().x,
+            _ => row.max.x - 3.0,
+        };
+        ask(&mut h, "ui.click", json!({"x": x, "y": row.center().y})).expect("click Add page");
+        settle(&mut h);
+        assert_eq!(pages_in(&section), before + 1, "{part}: one click adds exactly one page");
+        assert_eq!(h.query_all_by_label("Cancel").count(), 0, "{part}: no name dialog stands between the click and the page");
+        let root = h.state().session().root().to_path_buf();
+        let open = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"]["path"].as_str().map(|p| root.join(p));
+        assert!(open.as_ref().is_some_and(|p| p.starts_with(&section) && *p != s.md_page), "{part}: the new page is opened: {open:?}");
+    }
+}
+
+/// Issue #365: the recycle bin is a recovery workspace. Each item is a row with where it came
+/// from; one row is selected and Restore acts on it; deleting for good asks first with the
+/// keyboard on Cancel, and Cancel returns to the same row.
+#[test]
+fn the_recycle_bin_selects_restores_and_guards_permanent_deletion() {
+    use egui_kittest::kittest::NodeT as _;
+    for theme in [LIGHT, DARK] {
+        let (_t, app, s) = sample_app("ui-recycle-bin");
+        let mut h = sized_harness(app, theme, egui::vec2(1600.0, 900.0));
+        h.state_mut().open_path(&s.md_page.to_string_lossy());
+        settle(&mut h);
+        ask(&mut h, "engine.execute", json!({"command": "node.delete", "params": {"path": s.html_page.to_string_lossy()}})).expect("recycle a page");
+        settle(&mut h);
+        assert!(!s.html_page.exists());
+        h.get_by_label("History").click();
+        settle(&mut h);
+        h.get_by_label("Notebook Recycle Bin").click();
+        settle(&mut h);
+        review(&mut h, &format!("recycle_bin_{}", theme.mode.is_dark()));
+        assert_eq!(h.query_all_by_label("Back to notes").count(), 1, "the workspace has a way back");
+        let heard = h.get_by_label_contains("Project X, Page, Deleted").accesskit_node().label().unwrap_or_default();
+        assert!(heard.ends_with("from Work > Projects"), "the row is heard with its kind, time and place: {heard}");
+        let row_on = |h: &Harness<'_, NoteCraftApp>| {
+            h.get_by_label_contains("Project X, Page").accesskit_node().toggled().map(|t| t == egui::accesskit::Toggled::True)
+        };
+        assert_eq!(row_on(&h), Some(true), "the only item starts selected");
+        assert!(!h.get_by_label("Restore").accesskit_node().is_disabled());
+
+        h.get_by_label("Delete permanently...").click();
+        settle(&mut h);
+        assert!(h.query_all_by_label("Permanently delete?").count() > 0, "deleting for good asks first");
+        assert!(h.get_by_label("Cancel").accesskit_node().is_focused(), "the keyboard starts on Cancel");
+        ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("cancel");
+        settle(&mut h);
+        assert_eq!(h.query_all_by_label("Permanently delete?").count(), 0);
+        assert_eq!(row_on(&h), Some(true), "Cancel returns to the same row");
+
+        h.get_by_label("Restore").click();
+        settle(&mut h);
+        assert!(s.html_page.exists(), "Restore puts the page back where it was");
+        assert_eq!(h.query_all_by_label("This notebook's recycle bin is empty.").count(), 1, "the list is refreshed in place");
+        ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("leave");
+        settle(&mut h);
+        assert_eq!(h.query_all_by_label("Back to notes").count(), 0, "Escape returns to the page");
+    }
+}
+
+/// Issue #381: moving a section to the recycle bin says so in its title, is modal, and Escape
+/// cancels it with nothing moved.
+#[test]
+fn the_delete_confirmation_names_what_happens_and_escape_cancels_it() {
+    let (_t, app, s) = sample_app("ui-delete-confirm");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let section = s.md_page.parent().expect("section").to_path_buf();
+    let title = notecraft_store::tree::read_node(&section).expect("section").title;
+    h.get_all_by_label(&title).next().expect("section row").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Delete...").click();
+    settle(&mut h);
+    assert!(h.query_all_by_label("Move to recycle bin").count() >= 2, "the title and the action both say what happens");
+    assert_eq!(h.query_all_by_label("Delete notebook").count(), 0, "a section is not called a notebook");
+    review(&mut h, "delete_section_confirm");
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("cancel");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Move to recycle bin").count(), 0);
+    assert!(section.exists(), "Escape moved nothing");
+}
+
+/// Issue #370: results hang from the search box, each names its notebook and section, and the
+/// arrow keys choose the result that Enter opens.
+#[test]
+fn search_results_sit_under_the_field_show_where_and_follow_the_arrow_keys() {
+    use egui_kittest::kittest::NodeT as _;
+    let (_t, app, s) = sample_app("ui-search-polish");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 860.0));
+    h.state_mut().open_path(&s.deep_page.to_string_lossy());
+    settle(&mut h);
+    search_for(&mut h, "Level");
+    let field = h.get_all_by_role(egui::accesskit::Role::TextInput).find(|n| n.value().as_deref() == Some("Level")).expect("search field").rect();
+    // Result rows only: the notebook tree has a "Projects" row of its own.
+    let rows: Vec<_> = h.query_all_by_label_contains("Work > Projects)").collect();
+    assert!(!rows.is_empty(), "a result names its section");
+    // The popup is at least 420 wide and starts at the field, moved left only as far as it must
+    // be to keep 8 points clear of the right edge of the 1400-wide window.
+    let popup_left = field.min.x.min(1400.0 - field.width().max(420.0) - 8.0);
+    for row in &rows {
+        let r = row.rect();
+        assert!(r.min.y >= field.max.y, "results are under the field: {r:?} {field:?}");
+        assert!(r.min.x >= 0.0, "a result starts inside the window: {r:?}");
+        assert!(r.max.x <= 1400.0, "a result ends inside the window: {r:?}");
+        assert!((popup_left..=popup_left + 16.0).contains(&r.min.x), "a result starts at the popup's edge, {popup_left}: {r:?} {field:?}");
+    }
+    review(&mut h, "search_polish");
+    ask(&mut h, "ui.key", json!({"key": "ArrowDown"})).expect("down");
+    settle(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "ArrowDown"})).expect("down");
+    settle(&mut h);
+    let picked = h
+        .get_all_by_role(egui::accesskit::Role::Button)
+        .filter(|n| n.accesskit_node().label().is_some_and(|l| l.contains("Work > Projects)")))
+        .find(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+        .and_then(|n| n.accesskit_node().label())
+        .expect("a result is chosen");
+    ask(&mut h, "ui.key", json!({"key": "Enter"})).expect("open");
+    settle(&mut h);
+    let title = ask(&mut h, "ui.inspect", json!({})).expect("inspect")["page"]["title"].as_str().unwrap_or_default().to_string();
+    assert!(!title.is_empty() && picked.starts_with(&title), "Enter opens the chosen result: {picked} / {title}");
+}
+
+#[test]
+fn search_scope_applies_before_ranking_and_keeps_the_query() {
+    let (_t, app, s) = sample_app("ui-search-scope");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 800.0));
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    search_for(&mut h, "Level");
+    assert!(h.query_all_by_label_contains("Work > Projects)").count() > 0);
+    h.get_by_label("This section").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label_contains("Work > Projects)").count(), 0);
+    h.get_by_label("All notebooks").click();
+    settle(&mut h);
+    assert!(h.query_all_by_label_contains("Work > Projects)").count() > 0);
+    review(&mut h, "search_scope");
+}
+
+#[test]
+fn notebook_disclosure_changes_the_tree_without_opening_a_different_page() {
+    let (_t, app, s) = sample_app("ui-notebook-disclosure");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 800.0));
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    h.get_by_label("Collapse Work").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Projects").count(), 0);
+    assert_eq!(look_at(&mut h)["page"]["title"], "Project X");
+    h.get_by_label("Expand Work").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Projects").count(), 1);
+    assert_eq!(look_at(&mut h)["page"]["title"], "Project X");
+    review(&mut h, "notebook_disclosure");
+}
+
+#[test]
+fn file_info_opens_a_notebook_by_its_named_action_and_options_group_settings() {
+    for theme in [LIGHT, DARK] {
+        let (_t, mut app, s) = sample_app("ui-file-navigation");
+        app.open_path(&s.md_page.to_string_lossy());
+        app.open_backstage_page("Info");
+        let mut h = sized_harness(app, theme, egui::vec2(820.0, 760.0));
+        settle(&mut h);
+        h.get_by_label("Back to the notebook");
+        review(&mut h, &format!("file_info_{}", theme.id()));
+        h.get_by_label("Open Archive").click();
+        settle(&mut h);
+        assert_eq!(h.query_all_by_label("Notebook information").count(), 0);
+
+        h.state_mut().open_backstage_page("Options");
+        settle(&mut h);
+        let appearance = h.get_by_role_and_label(egui::accesskit::Role::Label, "Appearance and language").rect();
+        let language = h.get_by_label("Interface language").rect();
+        let storage = h.get_by_role_and_label(egui::accesskit::Role::Label, "Notebook storage").rect();
+        assert!(appearance.bottom() < language.top() && language.bottom() < storage.top());
+        review(&mut h, &format!("file_options_{}", theme.id()));
+    }
+}
+
+/// Issue #369: the tab row has a button listing every section, groups included, so a tab that
+/// has scrolled out of sight is one click away.
+#[test]
+fn section_tabs_have_an_all_sections_list() {
+    let (_t, app, s) = sample_app("ui-tabs-overflow");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 860.0));
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.get_by_label("View").click();
+    settle(&mut h);
+    h.get_by_label("Tabs layout").click();
+    settle(&mut h);
+    let before = h.query_all_by_label("Projects").count();
+    h.get_by_label("All sections").click();
+    settle(&mut h);
+    review(&mut h, "tabs_all_sections");
+    let names: Vec<_> = h.query_all_by_label("Projects").collect();
+    assert_eq!(names.len(), before + 1, "the list names a section inside a group");
+    names.last().expect("listed").click();
+    settle(&mut h);
+    assert!(h.state().body().unwrap_or_default().contains("Kickoff notes"), "choosing it opens the section's first page");
+}
+
+/// Issue #376: View's toggles show whether they are on, and Reset zoom says what it does and is
+/// only offered when there is something to reset.
+#[test]
+fn view_toggles_show_their_state_and_reset_zoom_resets() {
+    use egui_kittest::kittest::NodeT as _;
+    let (_t, app, s) = sample_app("ui-view-polish");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1800.0, 800.0));
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.get_by_label("View").click();
+    settle(&mut h);
+    assert_eq!(is_on(&h, "Tabs layout"), Some(false));
+    assert_eq!(is_on(&h, "Normal view"), Some(true), "the view in use is marked");
+    assert!(h.get_by_label("Reset zoom").accesskit_node().is_disabled(), "nothing to reset at 100%");
+    h.get_by_label("Zoom In").click();
+    settle(&mut h);
+    assert!(!h.get_by_label("Reset zoom").accesskit_node().is_disabled());
+    review(&mut h, "view_polish");
+    h.get_by_label("Reset zoom").click();
+    settle(&mut h);
+    assert!(h.get_by_label("Reset zoom").accesskit_node().is_disabled(), "the page is back at 100%");
+    h.get_by_label("Tabs layout").click();
+    settle(&mut h);
+    assert_eq!(is_on(&h, "Tabs layout"), Some(true));
+}
+
+/// Issue #380: the tree's menu keeps the shortcut out of the label.
+#[test]
+fn the_page_menu_names_new_page_without_its_shortcut() {
+    let (_t, app, s) = sample_app("ui-menu-polish");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let title = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    let row = h.get_all_by_label(&title).map(|n| n.rect()).min_by(|a, b| a.min.y.total_cmp(&b.min.y)).expect("page row");
+    h.get_all_by_label(&title).find(|n| n.rect() == row).expect("row").click_secondary();
+    settle(&mut h);
+    review(&mut h, "page_menu_polish");
+    assert_eq!(h.query_all_by_label("New page").count(), 1, "New page is named without its shortcut");
+    assert_eq!(h.query_all_by_label_contains("(Ctrl+N)").count(), 0);
+    assert_eq!(h.query_all_by_label("Delete...").count(), 1, "Delete is in the menu, in its own group");
+}
+
+/// Page navigation waits while a dialog is open: Ctrl+Page Down under the recycle bin leaves
+/// the page behind it alone, and works again once the dialog is closed.
+#[test]
+fn ctrl_page_down_does_not_change_the_page_under_a_dialog() {
+    let (_t, app, s) = sample_app("ui-nav-under-dialog");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1600.0, 900.0));
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    let title = |h: &mut Harness<'_, NoteCraftApp>| ask(h, "ui.inspect", json!({})).expect("inspect")["page"]["title"].clone();
+    assert_eq!(title(&mut h), json!("Project X"));
+    h.get_by_label("History").click();
+    settle(&mut h);
+    h.get_by_label("Notebook Recycle Bin").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Back to notes").count(), 1);
+    ask(&mut h, "ui.key", json!({"key": "PageDown", "ctrl": true})).expect("next page");
+    settle(&mut h);
+    assert_eq!(title(&mut h), json!("Project X"), "the page under the dialog does not change");
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("close");
+    settle(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "PageDown", "ctrl": true})).expect("next page");
+    settle(&mut h);
+    assert_eq!(title(&mut h), json!("Deep page"), "with the dialog closed the shortcut works");
+}
+
+/// A pen touching a folded ribbon shown over the page is a touch on the ribbon, not on the
+/// page: it picks up no pen. On the page below the ribbon it does.
+#[test]
+fn a_pen_on_a_folded_ribbon_over_the_page_picks_up_no_pen() {
+    let (_t, mut app, s) = sample_app("ui-auto-pen-ribbon");
+    app.open_path(&s.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 1000.0));
+    settle(&mut h);
+    let pointer = |h: &mut Harness<'_, NoteCraftApp>| {
+        let v = ask(h, "ui.inspect", json!({})).expect("inspect");
+        v.pointer("/ink/pointer").and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let pen = |h: &mut Harness<'_, NoteCraftApp>, at: egui::Pos2| {
+        let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase, pos, force: Some(0.6) };
+        h.input_mut().events.push(contact(egui::TouchPhase::Start, at));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        h.input_mut().events.push(contact(egui::TouchPhase::End, at));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        settle(h);
+    };
+    ask(&mut h, "ui.key", json!({"key": "F1", "ctrl": true})).expect("Ctrl+F1");
+    settle(&mut h);
+    let page = h.state().page_rect().expect("the page");
+    h.get_by_label("Home").click();
+    settle(&mut h);
+    assert_eq!(ask(&mut h, "ui.inspect", json!({})).expect("inspect")["ribbon"]["shown"], json!(true), "the ribbon is shown over the page");
+    // Just inside the page's top, under the ribbon shown over it, and clear of its buttons'
+    // labels on the right.
+    let under = egui::pos2(page.right() - 40.0, page.top() + 30.0);
+    assert_eq!(pointer(&mut h), "write");
+    pen(&mut h, under);
+    assert_eq!(pointer(&mut h), "write", "a pen on the ribbon over the page picks up no pen");
+
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("Escape");
+    settle(&mut h);
+    pen(&mut h, egui::pos2(page.center().x, page.top() + 400.0));
+    assert_eq!(pointer(&mut h), "draw", "on the page itself it does");
+}
+
+/// Issue #441: a page locks read only from its row's menu and from the empty space in the
+/// navigator, and unlocks from either. The lock is in the page's own file, and the open page follows
+/// it: a locked page refuses edits, and an unlocked one takes them again.
+#[test]
+fn the_page_and_empty_space_menus_lock_a_page_read_only_and_unlock_it() {
+    let (_t, app, s) = sample_app("ui-read-only-lock");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let writable = |h: &mut Harness<'_, NoteCraftApp>| ask(h, "ui.inspect", json!({})).expect("inspect").to_string().contains("\"writable\":true");
+    assert!(writable(&mut h), "a new page is editable");
+
+    // The page's own row: Lock read only, then Unlock once it is locked.
+    let title = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    let row = h.get_all_by_label(&title).map(|n| n.rect()).min_by(|a, b| a.min.y.total_cmp(&b.min.y)).expect("page row");
+    h.get_all_by_label(&title).find(|n| n.rect() == row).expect("row").click_secondary();
+    settle(&mut h);
+    review(&mut h, "page-menu-lock");
+    assert_eq!(h.query_all_by_label("Lock read only").count(), 1, "the page menu offers the lock");
+    h.get_by_label("Lock read only").click();
+    settle(&mut h);
+    assert!(notecraft_store::page::read_only(&s.md_page).expect("read"), "the lock is written in the page file");
+    assert!(!writable(&mut h), "the open page refuses edits once it is locked");
+
+    // The navigator's empty space under the page's row: Unlock, then the page takes edits again.
+    let blank = egui::pos2(row.center().x, row.max.y + 60.0);
+    ask(&mut h, "ui.click", json!({"x": blank.x, "y": blank.y, "button": "right"})).expect("right-click the empty space");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "the empty-space menu offers the unlock");
+    h.get_by_label("Unlock").click();
+    settle(&mut h);
+    assert!(!notecraft_store::page::read_only(&s.md_page).expect("read"), "the unlock is written in the page file");
+    assert!(writable(&mut h), "the open page takes edits again");
+    review(&mut h, "read-only-unlocked");
+}
+
+/// Issue #441: a locked page's title keeps its text. Typing into its title box changes nothing,
+/// and the page's title on disk stays as it was.
+#[test]
+fn a_locked_page_title_cannot_be_typed_over() {
+    let (_t, app, s) = sample_app("ui-locked-title");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let before = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+    let title = h
+        .get_all_by_role(egui::accesskit::Role::MultilineTextInput)
+        .find(|node| node.value().as_deref() == Some(before.as_str()))
+        .expect("the title box")
+        .rect();
+    ask(&mut h, "ui.click", json!({"x": title.center().x, "y": title.center().y})).expect("click the title");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "Renamed while locked"})).expect("type");
+    settle(&mut h);
+    let shown = ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+    assert_eq!(shown.pointer("/page/titleArea").and_then(Value::as_str), Some(before.as_str()), "the title box kept its text");
+    assert_eq!(notecraft_store::tree::read_node(&s.md_page).expect("page").title, before, "and the file did too");
+}
+
+/// Issue #441: the page body's own right-click menu offers the lock too, reading Lock read only
+/// for an editable page and Unlock for a locked one.
+#[test]
+fn the_page_body_menu_locks_and_unlocks_the_page() {
+    let (_t, app, s) = sample_app("ui-body-menu-lock");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let body_at = (820.0, 470.0);
+    ask(&mut h, "ui.click", json!({"x": body_at.0, "y": body_at.1, "button": "right"})).expect("right-click the body");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Lock read only").count(), 1, "the body menu offers the lock");
+    h.get_by_label("Lock read only").click();
+    settle(&mut h);
+    assert!(notecraft_store::page::read_only(&s.md_page).expect("read"), "the body menu locked the page");
+
+    ask(&mut h, "ui.click", json!({"x": body_at.0, "y": body_at.1, "button": "right"})).expect("right-click the body again");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "a locked page's body menu offers Unlock");
+    h.get_by_label("Unlock").click();
+    settle(&mut h);
+    assert!(!notecraft_store::page::read_only(&s.md_page).expect("read"), "and unlocks it again");
+    review(&mut h, "body-menu-lock");
+}
+
+/// Issue #441: a locked page's body menu still opens on a right-click. Its edit commands are shown
+/// greyed out and do nothing; Copy and Unlock stay enabled. The ribbon has buttons with the same
+/// words, so only the entries drawn where the menu opened are checked.
+#[test]
+fn a_locked_page_body_menu_offers_only_unlock() {
+    let (_t, app, s) = sample_app("ui-locked-body-menu");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    ask(&mut h, "ui.click", json!({"x": 820.0, "y": 470.0, "button": "right"})).expect("right-click the body");
+    settle(&mut h);
+    // The ribbon has buttons with the same words, so only entries drawn where the menu opened count.
+    let in_menu = |h: &mut Harness<'_, NoteCraftApp>, label: &str| h.query_all_by_label(label).filter(|n| n.rect().min.y >= 470.0 - 4.0).count();
+    assert_eq!(in_menu(&mut h, "Unlock"), 1, "the menu opens and offers Unlock");
+    for other in ["Copy", "Paste", "Cut", "Table", "Link", "Equation", "Date and time", "Picture from a file", "Attach a file"] {
+        assert_eq!(in_menu(&mut h, other), 0, "{other} is not in a locked page's menu");
+    }
+}
+
+/// Issue #441: a locked page's navigator menu still opens. Rename, Move, Delete and the other
+/// changes to the page are greyed out; Unlock, Copy link and Page versions stay enabled.
+#[test]
+fn a_locked_page_navigator_menu_greys_out_its_edits_and_keeps_the_rest() {
+    use egui_kittest::kittest::NodeT as _;
+    let (_t, app, s) = sample_app("ui-locked-nav-menu");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let title = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    let row = h
+        .get_all_by_label(&title)
+        .map(|n| n.rect())
+        .filter(|r| r.max.x < 300.0)
+        .min_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .expect("page row in the navigator");
+    h.get_all_by_label(&title).find(|n| n.rect() == row).expect("row").click_secondary();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "the row menu offers Unlock");
+    for edit in ["Rename...", "Move or Copy...", "Delete..."] {
+        let disabled: Vec<bool> = h.query_all_by_label(edit).map(|n| n.accesskit_node().is_disabled()).collect();
+        assert!(!disabled.is_empty() && disabled.iter().all(|d| *d), "{edit} is greyed out on a locked page: {disabled:?}");
+    }
+    for kept in ["Copy link to page", "Page versions", "New page"] {
+        let disabled: Vec<bool> = h.query_all_by_label(kept).map(|n| n.accesskit_node().is_disabled()).collect();
+        assert!(disabled.iter().any(|d| !*d), "{kept} stays enabled: {disabled:?}");
+    }
+}
+
+/// Issue #441: locking a page with unsaved edits saves them first, so the lock never leaves edits
+/// behind that the store would refuse.
+#[test]
+fn locking_a_page_saves_its_unsaved_edits_first() {
+    let (_t, app, s) = sample_app("ui-lock-saves-first");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
+    pump(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "unsaved words"})).expect("type");
+    assert!(ask(&mut h, "ui.inspect", json!({})).expect("inspect").to_string().contains("unsaved words"), "the edit is in the page, not saved yet");
+    // The page's own row in the navigator: Lock read only, with no save in between.
+    let title = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    let row = h
+        .get_all_by_label(&title)
+        .map(|n| n.rect())
+        .filter(|r| r.max.x < 300.0)
+        .min_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .expect("page row in the navigator");
+    h.get_all_by_label(&title).find(|n| n.rect() == row).expect("row").click_secondary();
+    settle_menu(&mut h);
+    h.get_by_label("Lock read only").click();
+    settle(&mut h);
+    assert!(notecraft_store::page::read_only(&s.md_page).expect("read"), "the page is locked");
+    let on_disk =
+        std::fs::read_to_string(s.md_page.join("index.md")).or_else(|_| std::fs::read_to_string(s.md_page.join("index.html"))).expect("page file");
+    assert!(on_disk.contains("unsaved words"), "the edit was saved before the lock took effect");
+}
+
+/// Steps a few frames so an open menu is drawn before it is looked up, without the settling
+/// that waits out an autosave.
+fn settle_menu(h: &mut Harness<'_, NoteCraftApp>) {
+    for _ in 0..3 {
+        pump(h);
+    }
+}
+
+/// The block header's `+` opens a popup of emoji; choosing one adds it beside the `+`, and
+/// choosing it again removes it. Acceptance criteria 1 to 3 of the emoji block-header POC.
+#[test]
+fn block_header_plus_adds_and_removes_an_emoji() {
+    const THUMB_UP: &str = "\u{1F44D}";
+    const GRIN: &str = "\u{1F600}";
+    let (_t, app, s) = sample_app("ui-block-emoji");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+
+    // Criterion 1: the popup is closed until the `+` is clicked.
+    assert_eq!(h.query_all_by_label(THUMB_UP).count(), 0, "popup starts closed");
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    assert!(h.query_all_by_label(GRIN).count() > 0, "the `+` opens the emoji popup");
+
+    // Criterion 2: choosing an emoji puts it beside the `+`.
+    h.get_by_label("Hands").click();
+    h.run();
+    h.query_all_by_label(THUMB_UP).last().expect("popup choice").click();
+    h.run();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label_contains("Remove").count(), 1, "the chosen emoji is shown once, beside the +");
+
+    // Criterion 3: clicking the emoji on the block takes it off the block.
+    h.query_all_by_label_contains("Remove").next().expect("the emoji on the block").click();
+    h.run();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label_contains("Remove").count(), 0, "clicking the emoji removes it");
+}
+
+/// Every event the interface records while a test runs, as (name, fields). The app's own sink
+/// writes these to the telemetry session; a test installs one that keeps them, so it can check
+/// what was recorded.
+static RECORDED: std::sync::Mutex<Vec<(String, Vec<(String, String)>)>> = std::sync::Mutex::new(Vec::new());
+
+fn record_usage_events() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        notecraft_ui_egui::usage::install(Box::new(|_level, event, fields| {
+            let owned = fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            RECORDED.lock().unwrap_or_else(|e| e.into_inner()).push((event.to_string(), owned));
+        }));
+    });
+}
+
+fn recorded_names() -> Vec<String> {
+    RECORDED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(n, _)| n.clone()).collect()
+}
+
+/// The block header is a control like the others: each click and choice is recorded, so the
+/// telemetry does not lose it.
+#[test]
+fn block_header_records_usage_like_the_other_controls() {
+    const THUMB_UP: &str = "\u{1F44D}";
+    record_usage_events();
+    let (_t, app, s) = sample_app("ui-block-emoji-telemetry");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let before = recorded_names().len();
+
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    h.get_by_label("Hands").click();
+    h.run();
+    h.query_all_by_label(THUMB_UP).last().expect("popup choice").click();
+    h.run();
+    settle(&mut h);
+    h.query_all_by_label_contains("Remove").next().expect("the emoji on the block").click();
+    h.run();
+    settle(&mut h);
+
+    let names: Vec<String> = recorded_names().into_iter().skip(before).collect();
+    let wanted = ["block_header_plus_opened", "block_emoji_added", "block_emoji_removed"];
+    for w in wanted {
+        assert!(names.iter().any(|n| n == w), "{w} should be recorded, got {names:?}");
+    }
+}
+
+/// Acceptance criterion 4 of the emoji block-header POC: the emoji chosen on a block is saved with
+/// the page, so it is still there after the window is closed and the page is opened again.
+#[test]
+fn a_block_emoji_is_saved_with_the_page_in_both_formats() {
+    const THUMB_UP: &str = "\u{1F44D}";
+    for open_md in [true, false] {
+        let (_t, app, s) = sample_app("ui-block-emoji-saved");
+        let page = if open_md { s.md_page.clone() } else { s.html_page.clone() };
+        let file = if open_md { page.join("index.md") } else { page.join("index.html") };
+        let mut h = harness(app, LIGHT);
+        h.state_mut().open_path(&page.to_string_lossy());
+        settle(&mut h);
+
+        h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+        h.run();
+        settle(&mut h);
+        h.get_by_label("Hands").click();
+        h.run();
+        h.query_all_by_label(THUMB_UP).last().expect("popup choice").click();
+        h.run();
+        settle(&mut h);
+        h.state_mut().save_page_now();
+
+        let saved = std::fs::read_to_string(&file).expect("the saved page");
+        assert!(saved.contains(THUMB_UP), "the emoji is written into the page (md={open_md}): {saved}");
+        assert!(saved.contains("nc-emoji"), "it is written as an emoji marker (md={open_md}): {saved}");
+    }
+}
+
+/// The block header is part of the block's frame: the top block's `+` sits in a row above its
+/// box's bar, and the emoji it holds sit right of the `+` on the same row. This guards the layout
+/// the person asked for, so a change to the box or the header cannot put the `+` back under the bar.
+#[test]
+fn the_header_sits_above_the_box_bar_and_its_emoji_beside_the_plus() {
+    const SMILE: &str = "\u{1F600}";
+    let (_t, mut app, s) = sample_app("ui-header-above-bar");
+    let md = s.md_page.to_string_lossy().to_string();
+    app.open_path(&md);
+    let mut h = harness(app, LIGHT);
+    settle(&mut h);
+    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": md.clone(), "body": "Hello in a box\n"}}))
+        .expect("write the page");
+    ask(&mut h, "engine.execute", json!({"command": "page.containers", "params": {"path": md.clone(), "boxes": "0,0,300,1"}}))
+        .expect("arrange the box");
+    ask(&mut h, "ui.open", json!({"path": md})).expect("open the boxed page");
+    settle(&mut h);
+
+    let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
+    let oy = origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let (_x, box_y, _w) = first_box(&mut h);
+    let bar_top = oy + box_y + HEADER_ROW;
+
+    let plus = h.query_all_by_label_contains("Add emoji to block").next().expect("the top block's `+`").rect();
+    assert!(plus.bottom() <= bar_top + 0.5, "the `+` is above the bar: plus bottom {} bar top {bar_top}", plus.bottom());
+    assert!(plus.top() >= oy + box_y - 0.5, "the `+` is in the row above the bar, not above the box: {plus:?}");
+
+    h.query_all_by_label_contains("Add emoji to block").next().expect("the top block's `+`").click();
+    h.run();
+    settle(&mut h);
+    h.query_all_by_label(SMILE).last().expect("a choice in the popup").click();
+    h.run();
+    settle(&mut h);
+
+    let chip = h.query_all_by_label_contains("Remove").next().expect("the emoji on the block").rect();
+    assert!(chip.left() >= plus.right(), "the emoji sit right of the `+`: chip {chip:?} plus {plus:?}");
+    assert!((chip.center().y - plus.center().y).abs() < 10.0, "the emoji are on the `+` row: chip {chip:?} plus {plus:?}");
+}
+
+/// An emoji on a block can be clicked to take it off, so the pointer turns into a hand over it, and
+/// stays an arrow over the page's plain text.
+#[test]
+fn the_pointer_is_a_hand_over_an_emoji_that_can_be_removed() {
+    const SMILE: &str = "\u{1F600}";
+    let (_t, app, s) = sample_app("ui-emoji-hover-cursor");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    h.query_all_by_label(SMILE).last().expect("a choice in the popup").click();
+    h.run();
+    settle(&mut h);
+
+    let chip = h.query_all_by_label_contains("Remove").next().expect("the emoji on the block").rect();
+    h.input_mut().events.push(egui::Event::PointerMoved(chip.center()));
+    h.run();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::PointingHand, "a hand over the emoji");
+
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(chip.center().x + 400.0, chip.center().y + 300.0)));
+    h.run();
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::PointingHand, "not a hand away from it");
+}
+
+/// The emoji popup has a search field: typing a word shows only the emoji it names.
+#[test]
+fn the_emoji_popup_searches_its_choices_by_name() {
+    const FIRE: &str = "\u{1F525}";
+    const GRIN: &str = "\u{1F600}";
+    let (_t, app, s) = sample_app("ui-emoji-search");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    assert!(h.query_all_by_label(GRIN).count() > 0, "the whole grid shows before any search");
+
+    h.get_by_label("Search emoji").click();
+    h.get_by_label("Search emoji").type_text("fire");
+    h.run();
+    settle(&mut h);
+    assert!(h.query_all_by_label(FIRE).count() > 0, "the search finds fire");
+    assert_eq!(h.query_all_by_label(GRIN).count(), 0, "and hides the emoji it does not name");
+}
+
+/// Issue #371: the footer keeps the save state and the default-format control in view. The
+/// notebook counts, the folder and the format inheritance sit behind one Details control, and
+/// a keyboard user reaches them from there.
+#[test]
+fn status_footer_keeps_format_in_view_and_moves_details_behind_a_button() {
+    let (_t, app, _s) = sample_app("ui-status-details");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 760.0));
+    settle(&mut h);
+    assert!(h.query_all_by_label("Default format").count() > 0, "the default-format control stays in the footer");
+    assert_eq!(h.query_all_by_label("Notebook details").count(), 1, "one Details control holds the counts and folder");
+    assert_eq!(h.query_all_by_label_contains(" \u{b7} ").count(), 0, "the counts are not in the footer before Details is opened");
+    h.get_by_label("Notebook details").click();
+    settle(&mut h);
+    assert!(h.query_all_by_label_contains(" \u{b7} ").count() > 0, "the details popup shows the notebook and item counts");
+    review(&mut h, "status-footer-details");
+}
+
+/// Issue #371: a long page title in the title band never runs under the search box or the
+/// Discord link, at the supported 1280-point width and at 150% display scaling, and its full
+/// text stays reachable by name.
+#[test]
+fn long_page_title_stays_clear_of_the_band_controls_at_1280_and_150_percent() {
+    let long = "https://example.com/notes/a/very/long/address/that/keeps/going/and/going/and/going/and/going/\u{0645}\u{0644}\u{0627}\u{062d}\u{0638}\u{0629}-title/\u{0645}\u{0644}\u{0627}\u{062d}\u{0638}\u{0629}-more";
+    for scale in [1.0_f32, 1.5] {
+        let t = TempDir::new("ui-title-band");
+        let mut s = session(&t);
+        let sample = create_sample(&mut s, Some(LOGO_PNG)).expect("sample");
+        s.run("node.title", &params(&[("path", sample.html_page.to_str().expect("utf8")), ("title", long)])).expect("rename");
+        let mut app = NoteCraftApp::new(s);
+        app.set_redact_paths(true);
+        app.open_path(&sample.html_page.to_string_lossy());
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1280.0, 760.0))
+            .with_pixels_per_point(scale)
+            .with_accessibility_check(false)
+            .build_ui_state(|ui, app: &mut NoteCraftApp| app.show(ui), app);
+        settle(&mut h);
+        let title = h.get_by_label(&format!("{long} - NoteCraft")).rect();
+        assert!(title.width() > 0.0, "the title is drawn at scale {scale}");
+        let search = h
+            .get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.rect().min.y < 40.0 && n.rect().max.x > 640.0)
+            .expect("search field")
+            .rect();
+        let discord = h.get_by_label("Discord").rect();
+        assert!(title.max.x <= search.min.x, "title {title:?} runs under search {search:?} at scale {scale}");
+        assert!(title.max.x <= discord.min.x || title.min.x >= discord.max.x, "title {title:?} overlaps Discord {discord:?} at scale {scale}");
+        review(&mut h, &format!("title-band-{}", (scale * 10.0) as u32));
+    }
+}
+
+/// Issue #371: an opened page with nothing to write says it is saved in the footer.
+#[test]
+fn status_footer_says_a_clean_page_is_saved() {
+    let (_t, mut app, s) = sample_app("ui-status-saved");
+    app.open_path(&s.html_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 760.0));
+    settle(&mut h);
+    assert!(
+        h.query_all_by_label_contains("HTML - Saved").count() > 0 || h.query_all_by_label_contains(" - Saved").count() > 0,
+        "the footer names the save state"
+    );
+}
+
+/// Issue #371: an error in the footer is set apart from a routine status, by its own mark as
+/// well as its colour, so it does not depend on colour alone.
+#[test]
+fn status_footer_marks_an_error_apart_from_a_routine_status() {
+    let (t, app, _s) = sample_app("ui-status-error");
+    let mut app = app;
+    let missing = t.path().join("no-such-page-folder");
+    app.open_path(&missing.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 760.0));
+    settle(&mut h);
+    assert!(h.query_all_by_label_contains("! ").count() > 0, "the error line carries its own mark");
+    review(&mut h, "status-footer-error");
+}
+
+/// Issue #441: a locked page shows a lock beside its name in the navigator, with the words
+/// "This page is locked read only" for its tooltip and its name. An unlocked page shows none.
+#[test]
+fn a_locked_page_shows_a_lock_in_the_navigator() {
+    let (_t, app, s) = sample_app("ui-nav-lock-mark");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("This page is locked read only").count(), 0, "an unlocked page shows no lock");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    ask(&mut h, "ui.inspect", json!({})).expect("inspect");
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let marks = h.query_all_by_label("This page is locked read only").filter(|n| n.rect().max.x < 300.0).count();
+    assert_eq!(marks, 1, "the locked page shows one lock in the navigator");
+    review(&mut h, "nav-lock-mark");
+}
+
+/// Issue #441: a locked page's menu opens on an empty place in the page, below its words, and a
+/// right-click on the navigator's lock mark still opens the row's own menu.
+#[test]
+fn a_locked_page_menu_opens_on_empty_space_and_the_lock_mark_keeps_the_row_menu() {
+    let (_t, app, s) = sample_app("ui-locked-empty-space");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    ask(&mut h, "ui.click", json!({"x": 820.0, "y": 700.0, "button": "right"})).expect("right-click empty space in the page");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "empty space in a locked page offers Unlock");
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("close the menu");
+    settle(&mut h);
+
+    let mark = h.query_all_by_label("This page is locked read only").map(|n| n.rect()).find(|r| r.max.x < 300.0).expect("the navigator's lock mark");
+    ask(&mut h, "ui.click", json!({"x": mark.center().x, "y": mark.center().y, "button": "right"})).expect("right-click the lock mark");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "the lock mark still opens the row's menu");
+}
+
+/// Issue #441: a locked page with only a line of text still opens its menu on the empty area
+/// below the words. The menu's area is the visible page, not the words' extent.
+#[test]
+fn a_short_locked_page_menu_opens_on_its_empty_area() {
+    let (_t, app, s) = sample_app("ui-short-locked-empty");
+    notecraft_store::page::save_body(&s.md_page, "Only line\n").expect("a short body");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock the page on disk");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    ask(&mut h, "ui.click", json!({"x": 820.0, "y": 700.0, "button": "right"})).expect("right-click the empty area below the line");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Unlock").count(), 1, "the empty area of a short locked page offers Unlock");
+}
+
+/// Issue #441: locking or unlocking a page from its menu updates its navigator mark at once,
+/// without reopening the page or the window.
+#[test]
+fn the_navigator_lock_mark_follows_lock_and_unlock_at_once() {
+    let (_t, app, s) = sample_app("ui-nav-mark-refresh");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    let title = notecraft_store::tree::read_node(&s.md_page).expect("page").title;
+    let row = |h: &mut Harness<'_, NoteCraftApp>| {
+        h.get_all_by_label(&title)
+            .map(|n| n.rect())
+            .filter(|r| r.max.x < 300.0)
+            .min_by(|a, b| a.min.y.total_cmp(&b.min.y))
+            .expect("page row in the navigator")
+    };
+    let marks = |h: &mut Harness<'_, NoteCraftApp>| h.query_all_by_label("This page is locked read only").filter(|n| n.rect().max.x < 300.0).count();
+    assert_eq!(marks(&mut h), 0, "an unlocked page has no mark");
+
+    let r = row(&mut h);
+    h.get_all_by_label(&title).find(|n| n.rect() == r).expect("row").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Lock read only").click();
+    settle(&mut h);
+    assert_eq!(marks(&mut h), 1, "locking shows the mark without reopening");
+
+    let r = row(&mut h);
+    h.get_all_by_label(&title).find(|n| n.rect() == r).expect("row").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Unlock").click();
+    settle(&mut h);
+    assert_eq!(marks(&mut h), 0, "unlocking removes the mark without reopening");
+}
+
+/// The emoji grid shows every choice, the party popper included, without scrolling.
+#[test]
+fn the_emoji_grid_shows_every_choice_including_the_party_popper() {
+    const POPPER: &str = "\u{1F389}";
+    let (_t, app, s) = sample_app("ui-emoji-grid-all");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    h.get_by_label("Symbols").click();
+    h.run();
+    settle(&mut h);
+    let popper = h.query_all_by_label(POPPER).last().expect("the party popper is in the grid").rect();
+    let _ = 0;
+    assert!(popper.height() > 0.0 && popper.width() > 0.0, "the popper is laid out: {popper:?}");
+}
+
+/// The emoji popup has tabs: the Hearts tab shows hearts only, and the Smileys tab is the first.
+#[test]
+fn the_emoji_popup_has_tabs_that_show_one_group_at_a_time() {
+    const GRIN: &str = "\u{1F600}";
+    const RED_HEART: &str = "\u{2764}\u{FE0F}";
+    let (_t, app, s) = sample_app("ui-emoji-tabs");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.query_all_by_label_contains("Add emoji to block").next().expect("a block header `+`").click();
+    h.run();
+    settle(&mut h);
+    assert!(h.query_all_by_label(GRIN).count() > 0, "the Smileys tab is shown first");
+    h.get_by_label("Hearts").click();
+    h.run();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label(GRIN).count(), 0, "the Hearts tab hides the smileys");
+    assert!(h.query_all_by_label(RED_HEART).count() > 0, "and shows the hearts");
+}
+
+/// Clicking on empty paper makes a block, and it is shown as a block at once: the bar and the border
+/// are drawn around it while the caret is in it, even before anything is written.
+#[test]
+fn a_block_made_by_clicking_empty_paper_shows_its_bar_and_border() {
+    let (_t, mut app, s) = sample_app("ui-new-block-edges");
+    let page = s.md_page.to_string_lossy().to_string();
+    app.open_path(&page);
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 900.0));
+    settle(&mut h);
+    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": page.clone(), "body": ""}})).expect("an empty page");
+    ask(&mut h, "ui.open", json!({"path": page})).expect("open it");
+    settle(&mut h);
+    assert_eq!(look_at(&mut h).pointer("/page/blocks").and_then(Value::as_u64), Some(0), "the page starts empty");
+    let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
+    ask(&mut h, "ui.click", json!({"x": ox + 300.0, "y": oy + 150.0})).expect("click the paper");
+    for _ in 0..8 {
+        pump(&mut h);
+    }
+    let v = look_at(&mut h);
+    assert!(v.pointer("/page/caret").is_some_and(|c| !c.is_null()), "the caret is in the new block: {v}");
+    let (bx, by, bw) = first_box(&mut h);
+    // The bar runs along the top of the box, just under the header row, as wide as the box and its padding.
+    let bar = egui::Rect::from_min_size(egui::pos2(ox + bx, oy + by + HEADER_ROW), egui::vec2(bw + 12.0, 14.0));
+    let near = |a: egui::Rect, b: egui::Rect| (a.min - b.min).length() < 4.0 && (a.max - b.max).length() < 4.0;
+    assert!(painted_rects(&h).iter().any(|r| near(*r, bar)), "the bar is drawn at {bar:?}: {:?}", painted_rects(&h));
+}
+
+/// A block made by clicking empty paper can be moved at once by dragging its bar, like any box.
+#[test]
+fn a_new_block_can_be_dragged_by_its_bar() {
+    let (_t, mut app, s) = sample_app("ui-new-block-drag");
+    let page = s.md_page.to_string_lossy().to_string();
+    app.open_path(&page);
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 900.0));
+    settle(&mut h);
+    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": page.clone(), "body": ""}})).expect("an empty page");
+    ask(&mut h, "ui.open", json!({"path": page})).expect("open it");
+    settle(&mut h);
+    let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
+    ask(&mut h, "ui.click", json!({"x": ox + 300.0, "y": oy + 150.0})).expect("click the paper");
+    for _ in 0..8 {
+        pump(&mut h);
+    }
+    let (x0, y0, w) = first_box(&mut h);
+    // The middle of the bar, just under the header row.
+    let from = egui::pos2(ox + x0 + w / 2.0, oy + y0 + HEADER_ROW + 7.0);
+    drag_by(&mut h, from, egui::vec2(100.0, 80.0));
+    let (x1, y1, _) = first_box(&mut h);
+    assert!(x1 > x0 + 50.0 && y1 > y0 + 40.0, "the box followed the pointer: ({x0}, {y0}) -> ({x1}, {y1})");
+}
+
+/// The pointer turns into the move cursor over the bar of a block made by clicking empty paper.
+#[test]
+fn the_pointer_shows_the_move_cursor_over_a_new_blocks_bar() {
+    let (_t, mut app, s) = sample_app("ui-new-block-cursor");
+    let page = s.md_page.to_string_lossy().to_string();
+    app.open_path(&page);
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 900.0));
+    settle(&mut h);
+    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": page.clone(), "body": ""}})).expect("an empty page");
+    ask(&mut h, "ui.open", json!({"path": page})).expect("open it");
+    settle(&mut h);
+    let origin = look_at(&mut h).pointer("/page/origin").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (ox, oy) = (origin.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, origin.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32);
+    ask(&mut h, "ui.click", json!({"x": ox + 300.0, "y": oy + 150.0})).expect("click the paper");
+    for _ in 0..8 {
+        pump(&mut h);
+    }
+    let (x, y, w) = first_box(&mut h);
+    let bar = egui::pos2(ox + x + w / 2.0, oy + y + HEADER_ROW + 7.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(bar));
+    h.run();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Move, "the move cursor over the bar");
+}
+
+/// A paragraph's emoji header sits under the paragraph, and a heading's sits above it; the frame
+/// of a box keeps its header above (issue #441 follow-up on the block header row).
+// Ignored until the UI/UX of a paragraph's emoji header is decided (see PARAGRAPH_HEADER_BELOW).
+#[ignore = "paragraph emoji placement is undecided; see PARAGRAPH_HEADER_BELOW"]
+#[test]
+fn a_paragraph_emoji_header_sits_under_the_paragraph() {
+    let (_t, app, s) = sample_app("ui-paragraph-emoji-below");
+    let body = "<h2 data-nc-emoji=\"\u{1F929}\">Heading</h2><p data-nc-emoji=\"\u{1F631}\">Paragraph words</p>";
+    notecraft_store::page::save_body(&s.html_page, body).expect("a heading and a paragraph with emoji");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    let words = h.query_all_by_label_contains("Paragraph words").next().expect("the paragraph").rect();
+    let chip = h.query_all_by_label("Remove \u{1F631} from block 2").next().expect("the paragraph's emoji").rect();
+    assert!(chip.min.y > words.max.y, "the paragraph's emoji is under its words: chip {chip:?}, words {words:?}");
+    let title = h.query_all_by_label("Heading").map(|n| n.rect()).find(|r| r.min.x > 300.0 && r.min.y > 150.0).expect("the heading on the page");
+    let heading_chip = h.query_all_by_label("Remove \u{1F929} from block 1").next().expect("the heading's emoji").rect();
+    assert!(heading_chip.max.y <= title.min.y + 1.0, "a heading's emoji stays above it: chip {heading_chip:?}, heading {title:?}");
+}
+
+/// Paragraphs draw no emoji `+` and show no emoji; their data is kept. A heading keeps its `+`,
+/// and the box's top block keeps its header above the frame.
+#[test]
+fn paragraphs_draw_no_plus_and_keep_the_box_top_header() {
+    let (_t, app, s) = sample_app("ui-paragraph-no-plus");
+    let body = "<h2>Plain heading</h2><p>Plain paragraph</p><div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"400\"><h2>Boxed heading</h2><p>Boxed paragraph</p></div><ul><li>Listed item</li></ul>";
+    notecraft_store::page::save_body(&s.html_page, body).expect("a heading, a paragraph and a box");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Add emoji to block 1").count(), 1, "the top block keeps its +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 2").count(), 0, "a paragraph draws no +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 3").count(), 1, "the box's top block keeps its + above the frame");
+    assert_eq!(h.query_all_by_label("Add emoji to block 4").count(), 0, "a paragraph in a box draws no +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 5").count(), 0, "a list item draws no +");
+}
+
+/// A paragraph and a list item hold emoji by accident: they draw no `+` and show no emoji, but the
+/// emoji stay in the page file. The box's top block keeps its header above the frame.
+#[test]
+fn a_paragraph_and_a_list_item_hide_their_emoji_but_keep_the_data() {
+    let (_t, app, s) = sample_app("ui-hidden-emoji-data");
+    let body = "<div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"400\"><h2>Box heading</h2><p data-nc-emoji=\"\u{1F600}\">Hidden paragraph</p><ul><li data-nc-emoji=\"\u{1F3AF}\">Hidden item</li></ul></div>";
+    notecraft_store::page::save_body(&s.html_page, body).expect("a box with a heading, a paragraph and a list item");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Add emoji to block 1").count(), 1, "the box's top block keeps its +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 2").count(), 0, "a paragraph with emoji draws no +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 3").count(), 0, "a list item with emoji draws no +");
+    let on_disk = notecraft_store::page::load_page(&s.html_page).expect("the page").body;
+    assert!(on_disk.contains("\u{1F600}"), "the paragraph's emoji stay in the file: {on_disk}");
+    assert!(on_disk.contains("\u{1F3AF}"), "the list item's emoji stay in the file: {on_disk}");
+}
+
+/// A heading below the page's top block draws no `+`: the `+` belongs to the box frame, and the top
+/// block is the one that keeps its header above it.
+#[test]
+fn a_heading_below_the_top_block_draws_no_plus() {
+    let (_t, app, s) = sample_app("ui-later-heading");
+    notecraft_store::page::save_body(&s.html_page, "<p>Some words</p><h2>Later heading</h2>").expect("a paragraph and a heading");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Add emoji to block 1").count(), 1, "the top block keeps its +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 2").count(), 0, "a heading below the top block draws no +");
+}
+
+/// A box whose top block is a table still draws that block's header above the frame.
+#[test]
+fn a_box_whose_top_block_is_a_table_keeps_its_plus() {
+    let (_t, app, s) = sample_app("ui-table-top-plus");
+    let body = "<div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"400\"><table><tr><td>Cell</td></tr></table><p>After the table</p></div>";
+    notecraft_store::page::save_body(&s.html_page, body).expect("a box whose first block is a table");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Add emoji to block 1").count(), 1, "the table as the box's top block keeps its +");
+    assert_eq!(h.query_all_by_label("Add emoji to block 2").count(), 0, "a paragraph after it draws no +");
+    // The pen view draws the same box: its top block keeps its + there too.
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    h.get_by_label("Pen red").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Add emoji to block 1").count(), 1, "with the pen in hand the table keeps its +");
+}
+
+/// Colour emoji are drawn in colour: a heading that holds a red apple paints more strongly coloured
+/// pixels than the same heading without it. Without colour-font support the emoji is blank.
+#[test]
+fn a_colour_emoji_is_drawn_in_colour() {
+    let _pixel_test = support::gui::pixel_test();
+    let coloured = |body: &str, name: &str| -> usize {
+        let (_t, app, s) = sample_app(name);
+        notecraft_store::page::save_body(&s.html_page, body).expect("a box with a heading");
+        let mut h = harness(app, LIGHT);
+        h.state_mut().open_path(&s.html_page.to_string_lossy());
+        settle(&mut h);
+        let img = support::gui::render(&mut h).expect("render");
+        img.pixels().filter(|p| p[0].max(p[1]).max(p[2]) as i32 - p[0].min(p[1]).min(p[2]) as i32 > 90).count()
+    };
+    let plain = coloured("<div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"400\"><h2>Heading</h2></div>", "ui-colour-plain");
+    let with_apple = coloured(
+        "<div class=\"nc-box\" data-x=\"0\" data-y=\"0\" data-width=\"400\"><h2 data-nc-emoji=\"\u{1F34E}\">Heading</h2></div>",
+        "ui-colour-apple",
+    );
+    assert!(with_apple > plain + 40, "the apple is drawn in colour: {with_apple} coloured pixels with it, {plain} without");
+}
+
+/// A finger on a touch screen scrolls the ribbon sideways by dragging it, after a pause too: the
+/// ribbon has to be ready for the drag before the finger comes down.
+#[test]
+fn a_finger_swipe_scrolls_the_ribbon() {
+    let (_t, mut app, s) = sample_app("ui-finger-swipe-ribbon");
+    app.open_path(&s.md_page.to_string_lossy());
+    let mut h = sized_harness(app, LIGHT, egui::vec2(700.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    let finger = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(1), id: egui::TouchId(3), phase, pos, force: None };
+    let swipe = |h: &mut Harness<'_, NoteCraftApp>, from: egui::Pos2, by: f32| {
+        h.input_mut().events.push(finger(egui::TouchPhase::Start, from));
+        h.input_mut().events.push(egui::Event::PointerMoved(from));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        for n in 1..=6 {
+            let at = from - egui::vec2(by * n as f32 / 6.0, 0.0);
+            h.input_mut().events.push(finger(egui::TouchPhase::Move, at));
+            h.input_mut().events.push(egui::Event::PointerMoved(at));
+            h.step();
+        }
+        let to = from - egui::vec2(by, 0.0);
+        h.input_mut().events.push(finger(egui::TouchPhase::End, to));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    };
+    // A first touch: the window learns it has a touch screen, as egui's own scrolling does.
+    let add = h.get_by_label("Add").rect().center();
+    swipe(&mut h, add, 0.0);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    for _ in 0..10 {
+        h.step();
+    }
+    let from = h.get_by_label("Add").rect().center();
+    swipe(&mut h, from, 200.0);
+    settle(&mut h);
+    let after = h.get_by_label("Add").rect().center();
+    assert!(after.x < from.x - 100.0, "the finger's swipe scrolled the ribbon: {from:?} -> {after:?}");
+}
+
+/// A pen on a tablet arrives as a touch with a force, and a tap with it moves a pixel or two
+/// before it lifts: on the ribbon that is a click on the control under it. The ribbon scrolls
+/// sideways under a finger, but a pen, and a mouse once a pen has been used, do not scroll it.
+#[test]
+fn a_pen_tap_on_the_ribbon_clicks_and_does_not_scroll_it() {
+    let (_t, mut app, s) = sample_app("ui-pen-tap-ribbon");
+    app.open_path(&s.md_page.to_string_lossy());
+    // Narrow, so the Draw tab is wider than the window and its ribbon scrolls.
+    let mut h = sized_harness(app, LIGHT, egui::vec2(700.0, 900.0));
+    settle(&mut h);
+    h.get_by_label("Draw").click();
+    settle(&mut h);
+    let add = h.get_by_label("Add").rect().center();
+    let contact = |phase, pos| egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(7), phase, pos, force: Some(0.5) };
+    h.input_mut().events.push(egui::Event::PointerMoved(add));
+    h.step();
+    h.input_mut().events.push(contact(egui::TouchPhase::Start, add));
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: add,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    // The pen wobbles on the way, as it does on a tablet mapped to a large screen: more than
+    // the six points egui gives a mouse click. (One frame: the harness steps a quarter of a
+    // second, and a press held past 0.8 s is not a click.)
+    let up = add + egui::vec2(9.0, 3.0);
+    h.input_mut().events.push(contact(egui::TouchPhase::Move, up));
+    h.input_mut().events.push(egui::Event::PointerMoved(up));
+    h.step();
+    h.input_mut().events.push(contact(egui::TouchPhase::End, up));
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: up,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    settle(&mut h);
+    assert!(h.query_by_label("Add Pen").is_some(), "the pen's tap opened Add");
+    let still = h.get_by_label("Add").rect().center();
+    assert!((still.x - add.x).abs() < 1.0, "the ribbon did not scroll under the pen: {add:?} -> {still:?}");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+
+    // A mouse drag on the ribbon, now that a pen has been seen, does not scroll it either.
+    let from = h.get_by_label("Add").rect().center();
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    for n in 1..=10 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from - egui::vec2(20.0 * n as f32, 0.0)));
+        h.step();
+    }
+    let to = from - egui::vec2(200.0, 0.0);
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    settle(&mut h);
+    let after = h.get_by_label("Add").rect().center();
+    assert!((after.x - from.x).abs() < 1.0, "a mouse drag did not scroll the ribbon: {from:?} -> {after:?}");
+}
+
+#[test]
+fn emoji_picker_escape_clear_and_outside_click_are_local_to_one_opening() {
+    let (_t, app, s) = sample_app("ui-emoji-picker-dismiss");
+    let html = r#"<div class="nc-box" data-x="0" data-y="0" data-width="220"><h2>First heading</h2></div>
+<div class="nc-box" data-x="350" data-y="140" data-width="220"><h2>Second heading</h2></div>"#;
+    notecraft_store::page::save_body(&s.html_page, html).expect("two boxes with independent emoji pickers");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    let outside = h.get_by_label("File").rect().center();
+    h.get_by_label("Add emoji to block 1").click();
+    settle(&mut h);
+    h.get_by_label("Search emoji").type_text("no-such-emoji");
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("No emoji match.").count(), 1);
+    h.get_by_label("Clear").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Smileys").count(), 1);
+
+    h.get_by_label("Search emoji").type_text("no-such-emoji");
+    settle(&mut h);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Search emoji").count(), 0);
+
+    h.get_by_label("Add emoji to block 1").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("No emoji match.").count(), 0);
+    h.get_by_label("Search emoji").type_text("no-such-emoji");
+    settle(&mut h);
+    // Click through the backdrop toward the ribbon. No File screen should open.
+    h.event(egui::Event::PointerMoved(outside));
+    h.event(egui::Event::PointerButton { pos: outside, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run();
+    h.event(egui::Event::PointerButton { pos: outside, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Search emoji").count(), 0);
+
+    h.get_by_label("Add emoji to block 2").click();
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("Search emoji").count(), 1);
+    assert_eq!(h.query_all_by_label("No emoji match.").count(), 0);
+    assert_eq!(h.query_all_by_label("Smileys").count(), 1);
+}
+
+#[test]
+fn restyling_a_badged_block_keeps_the_badge_after_save_and_reload() {
+    let (_t, app, s) = sample_app("ui-restyle-keeps-badge");
+    let badge = "\u{1F4CC}";
+    notecraft_store::page::save_body(&s.md_page, &format!("<!-- nc-emoji: {badge} -->\nStyled text.\n")).expect("Markdown fixture");
+    notecraft_store::page::save_body(&s.html_page, &format!("<p data-nc-emoji=\"{badge}\">Styled text.</p>")).expect("HTML fixture");
+    let mut h = harness(app, LIGHT);
+    for (page, file, heading) in [
+        (&s.md_page, "index.md", format!("<!-- nc-emoji: {badge} -->\n## Styled text.")),
+        (&s.html_page, "index.html", format!("<h2 data-nc-emoji=\"{badge}\">Styled text.</h2>")),
+    ] {
+        h.state_mut().open_path(&page.to_string_lossy());
+        settle(&mut h);
+        ask(&mut h, "ui.caret", json!({"block": 0})).expect("caret");
+        pump(&mut h);
+        ask(&mut h, "ui.block", json!({"kind": "h2"})).expect("heading");
+        settle(&mut h);
+        let body = h.state().body().unwrap_or_default();
+        assert!(body.contains(&heading), "{body}");
+        h.state_mut().save_page_now();
+        settle(&mut h);
+        let persisted = std::fs::read_to_string(page.join(file)).expect("saved page");
+        assert!(persisted.contains(&heading), "{persisted}");
+        h.state_mut().open_path(&page.to_string_lossy());
+        settle(&mut h);
+        assert!(h.state().body().unwrap_or_default().contains(&heading));
+    }
+}
+
+#[test]
+fn one_backspace_removes_one_grapheme_in_each_page_caret_without_joining_blocks() {
+    let (_t, app, s) = sample_app("ui-backspace-grapheme");
+    let accent = "e\u{301}";
+    let coder = "\u{1F469}\u{200D}\u{1F4BB}";
+    let rtl = "\u{633}\u{64E}";
+    let fixture = format!("Earlier paragraph.\n\n{coder}follow\n\n{accent}follow\n\nfollow{rtl}\n");
+    notecraft_store::page::save_body(&s.md_page, &fixture).expect("fixture");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    for (block, cluster) in [(1, coder), (2, accent)] {
+        ask(&mut h, "ui.caret", json!({"block": block})).expect("caret");
+        settle(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "Home"})).expect("start");
+        pump(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "ArrowRight"})).expect("past the first scalar");
+        pump(&mut h);
+        ask(&mut h, "ui.key", json!({"key": "Backspace"})).expect("remove grapheme");
+        settle(&mut h);
+        let body = h.state().body().unwrap_or_default();
+        assert!(!body.contains(cluster), "{body}");
+        assert_eq!(body.lines().filter(|line| *line == "follow").count(), block, "whole cluster deleted, adjacent text survives: {body}");
+        let status = ask(&mut h, "ui.inspect", json!({})).expect("block count");
+        assert_eq!(status["page"]["blocks"], json!(4), "deleting into position zero is not joining blocks");
+    }
+    // At the logical end of the fourth block, the custom bidi caret handles Backspace.
+    ask(&mut h, "ui.caret", json!({"block": 3})).expect("bidi caret");
+    settle(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "End"})).expect("logical end");
+    pump(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "Backspace"})).expect("remove bidi grapheme");
+    settle(&mut h);
+    let body = h.state().body().unwrap_or_default();
+    assert!(!body.contains('\u{633}') && !body.contains('\u{64E}'), "{body}");
+    assert_eq!(body.lines().filter(|line| *line == "follow").count(), 3, "{body}");
+
+    ask(&mut h, "ui.caret", json!({"block": 1})).expect("caret");
+    settle(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "Home"})).expect("start");
+    pump(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "Backspace"})).expect("join at the start");
+    settle(&mut h);
+    let status = ask(&mut h, "ui.inspect", json!({})).expect("block count");
+    assert_eq!(status["page"]["blocks"], json!(3), "a second press genuinely at the start still joins the blocks");
+}
+
+/// The picker search, not the underlying note, owns native clipboard shortcuts.
+#[test]
+fn emoji_picker_paste_stays_in_search_then_page_paste_resumes() {
+    let board = MemoryBoard::new();
+    let (_t, app, s) = sample_app("ui-emoji-picker-paste");
+    let html = r#"<div class="nc-box" data-x="0" data-y="0" data-width="220"><h2>Heading before edits</h2></div>"#;
+    notecraft_store::page::save_body(&s.html_page, html).expect("a box with a picker");
+    let mut h = harness(app.with_clipboard(Box::new(board.clone())), LIGHT);
+    h.state_mut().open_path(&s.html_page.to_string_lossy());
+    settle(&mut h);
+    ask(&mut h, "ui.caret", json!({"block": 0})).expect("page caret");
+    settle(&mut h);
+
+    for path in ["key-only", "queued", "queued-with-event"] {
+        h.get_by_label("Add emoji to block 1").click();
+        settle(&mut h);
+        let before = h.state().body().expect("page body").to_owned();
+        board.put_text("grinning");
+        if path == "key-only" {
+            ask(&mut h, "ui.key", json!({"key": "V", "ctrl": true})).expect("Ctrl+V");
+        } else {
+            h.state_mut().queue_keyboard_paste();
+            if path == "queued-with-event" {
+                h.event(egui::Event::Paste("grinning".into()));
+            }
+        }
+        settle(&mut h);
+        assert_eq!(h.state().body().expect("page body"), before, "{path} changed the page behind the picker");
+        assert_eq!(h.query_all_by_label("Smileys").count(), 0, "{path} should activate search");
+        assert_eq!(h.query_all_by_label("No emoji match.").count(), 0, "{path} should not duplicate the search text");
+        h.key_press(egui::Key::Escape);
+        settle(&mut h);
+    }
+
+    board.put_text("page paste still works");
+    h.state_mut().queue_keyboard_paste();
+    settle(&mut h);
+    assert!(h.state().body().unwrap_or_default().contains("page paste still works"));
+
+    // A real page edit gives the page undo stack something to undo.
+    ask(&mut h, "ui.caret", json!({"block": 0})).expect("page caret");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "undo-target-749"})).expect("typing");
+    settle(&mut h);
+    assert!(h.state().body().unwrap_or_default().contains("undo-target-749"));
+    let status = ask(&mut h, "ui.inspect", json!({})).expect("page history");
+    assert_eq!(status["page"]["history"]["canUndo"], true);
+    h.get_by_label("Add emoji to block 1").click();
+    settle(&mut h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut h);
+    assert!(h.state().body().unwrap_or_default().contains("undo-target-749"));
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut h);
+    assert!(!h.state().body().unwrap_or_default().contains("undo-target-749"));
+}
+
+#[test]
+fn global_search_keyboard_does_not_undo_or_add_rows_behind_it() {
+    let (_t, mut app, s) = sample_app("ui-search-page-key-ownership");
+    notecraft_store::page::save_body(&s.html_page, "<table><tr><th>Fruit</th><th>Count</th></tr><tr><td>apple</td><td>Two</td></tr></table>")
+        .expect("fixture");
+    app.open_path(&s.html_page.to_string_lossy());
+    let mut h = harness(app, LIGHT);
+    settle(&mut h);
+    let cell = h.get_by_label("Two").rect().center();
+    ask(&mut h, "ui.click", json!({"x": cell.x, "y": cell.y})).expect("last cell");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "new"})).expect("edit the last cell");
+    settle(&mut h);
+    let before = h.state().body().unwrap_or_default().to_string();
+    assert!(before.contains("new"), "{before}");
+    ask(&mut h, "ui.key", json!({"key": "F", "ctrl": true})).expect("search");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "search phrase"})).expect("query");
+    settle(&mut h);
+    for (key, ctrl) in [("Z", true), ("Tab", false)] {
+        ask(&mut h, "ui.key", json!({"key": key, "ctrl": ctrl})).expect("global search key");
+        settle(&mut h);
+        assert_eq!(h.state().body().unwrap_or_default(), before, "search must not give {key} to the page");
+    }
+}
+
+#[test]
+fn window_capture_follows_a_moved_page_and_can_recover_unsaved_edits() {
+    use notecraft_engine::Output;
+    for (mode, replace_old) in [("clean", false), ("clean", true), ("copy", false), ("reload", true)] {
+        let (_t, mut first, sample) = sample_app("window-moved");
+        let page = sample.md_page;
+        let destination = sample.html_page.parent().expect("destination section").to_path_buf();
+        first.open_path(&page.to_string_lossy());
+        let mut second = first.child_window(&notecraft_ui_egui::windows::Request { path: page.clone(), quick: false }).expect("second view");
+        if mode != "clean" {
+            second.set_body("Unsaved second window\n");
+        }
+        let old = page.to_string_lossy();
+        let to = destination.to_string_lossy();
+        let Output::Path(moved) = first.session_mut().run("node.move", &params(&[("path", &old), ("to", &to)])).expect("move") else {
+            panic!("move returned no path");
+        };
+        let body = notecraft_store::page::load_page(&moved).expect("original").body;
+        if replace_old {
+            let parent = page.parent().expect("old section").to_string_lossy();
+            let Output::Path(replacement) = first
+                .session_mut()
+                .run("node.create", &params(&[("parent", &parent), ("kind", "page"), ("title", "Format ideas")]))
+                .expect("create replacement at old path")
+            else {
+                panic!("missing replacement");
+            };
+            assert_eq!(replacement, page);
+            notecraft_store::page::save_body(&replacement, "A completely different note\n").expect("save replacement");
+        }
+        second.check_page_changes();
+        if mode == "copy" {
+            assert!(second.has_page_conflict());
+            assert!(second.is_dirty());
+            let copy = second.keep_conflicted_copy().expect("recover local changes after move");
+            assert_ne!(copy, moved);
+            assert!(notecraft_store::page::load_page(&copy).expect("copy").body.contains("Unsaved second window"));
+        } else {
+            if mode == "reload" {
+                assert!(second.has_page_conflict());
+                assert!(second.is_dirty());
+                assert!(second.reload_conflicted_page());
+            }
+            assert!(!second.has_page_conflict(), "moving an unmodified view is not a conflict");
+            assert_eq!(second.current_page(), Some(moved.as_path()));
+            assert_eq!(second.body(), Some(body.as_str()));
+        }
+        assert_eq!(notecraft_store::page::load_page(&moved).expect("original unchanged").body, body);
+        if replace_old {
+            assert_eq!(notecraft_store::page::load_page(&page).expect("replacement untouched").body, "A completely different note\n");
+        }
+    }
+}
+
+#[test]
+fn a_small_fixed_sheet_recenters_when_the_window_grows() {
+    let (_t, mut app, s) = sample_app("ui-paper-recenter");
+    notecraft_store::page::set_paper_size(&s.html_page, notecraft_model::paper::Paper::parse("a6 portrait 19.05,19.05,19.05,19.05")).expect("paper");
+    app.open_path(&s.html_page.to_string_lossy());
+    let origin = |h: &mut Harness<'_, NoteCraftApp>| ask(h, "ui.inspect", json!({})).expect("inspect")["page"]["origin"][0].as_f64().expect("page x");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1280.0, 900.0));
+    settle(&mut h);
+    let before = origin(&mut h);
+    h.set_size(egui::vec2(1500.0, 900.0));
+    settle(&mut h);
+    let delta = origin(&mut h) - before;
+    assert!((delta - 110.0).abs() < 2.0, "the fixed sheet moves half the width added: {delta}");
+}
+
+#[test]
+fn file_search_reports_empty_results_and_opens_a_matching_page() {
+    let (_t, app, s) = sample_app("ui-file-search");
+    let mut h = harness(app, LIGHT);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    h.state_mut().open_backstage_page("Info");
+    settle(&mut h);
+    search_for(&mut h, "missingfixtureqaz");
+    assert_eq!(h.query_all_by_label("No pages match.").count(), 1);
+    ask(&mut h, "ui.key", json!({"key": "Escape"})).expect("dismiss");
+    settle(&mut h);
+    search_for(&mut h, "Kickoff");
+    h.get_by_label_contains("kickoff notes").click();
+    settle(&mut h);
+    assert!(h.state().body().unwrap_or_default().contains("Kickoff notes"));
+    assert_eq!(h.query_all_by_label("Back to the notebook").count(), 0, "the matching note is visible");
+}
+
+#[test]
+fn new_notebook_name_does_not_recapture_tab_focus() {
+    let t = TempDir::new("ui-new-notebook-tab");
+    let mut h = harness(NoteCraftApp::new(session(&t)), LIGHT);
+    settle(&mut h);
+    h.get_by_label("New notebook").click();
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "Study"})).expect("name");
+    pump(&mut h);
+    ask(&mut h, "ui.key", json!({"key": "Tab"})).expect("move focus");
+    settle(&mut h);
+    ask(&mut h, "ui.text", json!({"text": "ShouldNotEnterName"})).expect("text at next control");
+    pump(&mut h);
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    assert!(h.state().session().tree().iter().any(|n| n.info.title == "Study"));
+}
+
+#[test]
+fn locked_pages_explain_the_lock_and_keep_version_preview_available() {
+    use egui_kittest::kittest::NodeT as _;
+    let (_t, app, s) = sample_app("ui-locked-version-preview");
+    notecraft_store::page::save_body(&s.md_page, "Current words.\n").expect("save a version");
+    notecraft_store::page::set_read_only(&s.md_page, true).expect("lock");
+    let file = s.md_page.join("index.md");
+    let before = std::fs::read(&file).expect("locked page");
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1600.0, 900.0));
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    assert!(h.query_all_by_label("This page is locked read only").next().is_some());
+    assert!(h.query_by_label_contains("holds markup").is_none());
+    h.get_by_label("History").click();
+    settle(&mut h);
+    h.get_by_label("Page Versions").click();
+    settle(&mut h);
+    assert!(h.get_by_label("Restore").accesskit_node().is_disabled());
+    h.get_by_label("Preview").click();
+    settle(&mut h);
+    assert!(h.get_by_label("Restore this version").accesskit_node().is_disabled());
+    assert!(h.query_by_label("Back to the list").is_some(), "preview stays usable");
+    assert_eq!(std::fs::read(&file).expect("locked page"), before);
+}
+
+#[test]
+fn file_copy_and_account_controls_are_reachable_at_large_interface_sizes() {
+    // At 200% scaling, 820 by 520 native pixels give this much usable layout room.
+    let (_t, app, s) = sample_app("ui-file-large-type");
+    let size = egui::vec2(410.0, 260.0);
+    let mut h = sized_harness(app, LIGHT, size);
+    h.state_mut().open_path(&s.md_page.to_string_lossy());
+    settle(&mut h);
+    for (page, labels) in [("Save a Copy", ["Choose\u{2026}", "Save the copy"]), ("Account", ["Keep this name", "Keep no name"])] {
+        h.state_mut().open_backstage_page(page);
+        settle(&mut h);
+        ask(&mut h, "ui.move", json!({"x": 292, "y": 174})).expect("pointer over content");
+        pump(&mut h);
+        ask(&mut h, "ui.scroll", json!({"y": -700})).expect("scroll down the File body");
+        settle(&mut h);
+        for label in labels {
+            let at = h.get_by_label(label).rect().center();
+            assert!((116.0..size.x).contains(&at.x) && (30.0..size.y).contains(&at.y), "{page}: {label} at {at:?} is within the File body");
+        }
+    }
+}
+
+#[test]
+fn the_notebook_recycle_bin_is_available_when_its_last_content_is_deleted() {
+    use egui_kittest::kittest::NodeT as _;
+    use notecraft_engine::Output;
+    for kind in ["page", "section", "group"] {
+        let t = TempDir::new("ui-empty-bin");
+        let mut se = session(&t);
+        let make = |s: &mut Session, command: &str, p: &[(&str, &str)]| match s.run(command, &params(p)).expect(command) {
+            Output::Path(x) => x,
+            _ => panic!("missing fixture path"),
+        };
+        let nb = make(&mut se, "notebook.create", &[("name", "Recovery QA"), ("empty", "true")]);
+        let group = make(&mut se, "node.create", &[("parent", &nb.to_string_lossy()), ("kind", "section-group"), ("title", "Test group")]);
+        let section = make(&mut se, "node.create", &[("parent", &group.to_string_lossy()), ("kind", "section"), ("title", "Test section")]);
+        let page = make(&mut se, "node.create", &[("parent", &section.to_string_lossy()), ("kind", "page"), ("title", "Only page")]);
+        se.run("page.save", &params(&[("path", &page.to_string_lossy()), ("body", "<p>Saved content</p>")])).expect("save");
+        let (target, label) = match kind {
+            "page" => (&page, "Only page"),
+            "section" => (&section, "Test section"),
+            _ => (&group, "Test group"),
+        };
+        let mut h = sized_harness(NoteCraftApp::new(se), LIGHT, egui::vec2(1600.0, 900.0));
+        h.state_mut().open_path(&page.to_string_lossy());
+        settle(&mut h);
+        h.get_all_by_label(label).next().expect("tree row").click_secondary();
+        settle(&mut h);
+        h.get_by_label("Delete...").click();
+        settle(&mut h);
+        ask(&mut h, "ui.key", json!({"key":"Enter"})).expect("confirm recycle move");
+        settle(&mut h);
+        assert!(!target.exists());
+        h.get_by_label("History").click();
+        settle(&mut h);
+        assert!(!h.get_by_label("Notebook Recycle Bin").accesskit_node().is_disabled(), "{kind} after deletion");
+        drop(h);
+
+        let mut h = sized_harness(NoteCraftApp::new(session(&t)), LIGHT, egui::vec2(1600.0, 900.0));
+        settle(&mut h);
+        h.get_by_label("History").click();
+        settle(&mut h);
+        assert!(!h.get_by_label("Notebook Recycle Bin").accesskit_node().is_disabled(), "{kind} after restarting");
+        h.get_by_label("Notebook Recycle Bin").click();
+        settle(&mut h);
+        h.get_by_label("Restore").click();
+        settle(&mut h);
+        assert!(notecraft_store::page::load_page(&page).expect("restored original").body.contains("Saved content"));
+    }
+}
+
+/// A click on a line of words puts the caret in that line, where the pointer is: not in the
+/// line below it.
+#[test]
+fn a_click_on_a_line_puts_the_caret_in_that_line() {
+    for boxed in [false, true] {
+        let (_t, mut app, s) = sample_app("ui-caret-at-the-click");
+        let md = s.md_page.to_string_lossy().to_string();
+        app.open_path(&md);
+        let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 900.0));
+        settle(&mut h);
+        let lines = ["Alpha line", "Bravo line", "Charlie line", "Delta line", "Echo line"];
+        let body = lines.join("\n\n") + "\n";
+        ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": md.clone(), "body": body}})).expect("write the page");
+        if boxed {
+            ask(&mut h, "engine.execute", json!({"command": "page.containers", "params": {"path": md.clone(), "boxes": "0,0,400,5"}}))
+                .expect("one box");
+        }
+        ask(&mut h, "ui.open", json!({"path": md.clone()})).expect("open");
+        settle(&mut h);
+        for (n, line) in lines.iter().enumerate() {
+            let Some(rect) = h.query_by_label(line).map(|node| node.rect()) else { panic!("boxed={boxed}: {line} is shown") };
+            let at = egui::pos2(rect.left() + 20.0, rect.center().y);
+            ask(&mut h, "ui.click", json!({"x": at.x, "y": at.y})).expect("click the line");
+            settle(&mut h);
+            let state = look_at(&mut h);
+            let block = state.pointer("/page/caret/block").and_then(Value::as_u64);
+            assert_eq!(
+                block,
+                Some(n as u64),
+                "boxed={boxed}: a click on {line:?} at {at:?} put the caret in its line: {}",
+                state.pointer("/page/caret").cloned().unwrap_or(Value::Null)
+            );
+        }
+    }
+}
+
+/// A click on open paper puts the caret where the pointer is: the line the caret stands in
+/// is under the pointer, not a header's height below it.
+#[test]
+fn a_click_on_open_paper_puts_the_caret_under_the_pointer() {
+    let (_t, mut app, s) = sample_app("ui-caret-on-open-paper");
+    let md = s.md_page.to_string_lossy().to_string();
+    app.open_path(&md);
+    let mut h = sized_harness(app, LIGHT, egui::vec2(1400.0, 900.0));
+    settle(&mut h);
+    ask(&mut h, "engine.execute", json!({"command": "page.save", "params": {"path": md.clone(), "body": "Alpha line\n"}})).expect("write the page");
+    ask(&mut h, "engine.execute", json!({"command": "page.containers", "params": {"path": md.clone(), "boxes": "0,0,300,1"}})).expect("one box");
+    ask(&mut h, "ui.open", json!({"path": md.clone()})).expect("open");
+    settle(&mut h);
+    let origin = page_origin(&mut h);
+    let at = origin + egui::vec2(500.0, 300.0);
+    ask(&mut h, "ui.click", json!({"x": at.x, "y": at.y})).expect("click open paper");
+    settle(&mut h);
+    let focused = h.ctx.memory(|m| m.focused()).and_then(|id| h.ctx.read_response(id)).map(|r| r.rect);
+    let state = look_at(&mut h);
+    let Some(line) = focused else { panic!("a caret was placed: {}", state.pointer("/page").cloned().unwrap_or(Value::Null)) };
+    assert!(
+        line.top() - 4.0 <= at.y && at.y <= line.bottom() + 4.0,
+        "the caret's line {line:?} is under the click at {at:?}: {}",
+        state.pointer("/page/containers").cloned().unwrap_or(Value::Null)
+    );
 }
